@@ -34,8 +34,13 @@ def embed_tiles(cfg):
 
     paths, batch, embeddings = [], [], []
 
-    dataset_dir = cfg["data"]["dataset_dir"]
-    for shard_path in tqdm(sorted(Path(dataset_dir).glob("shard-*.parquet"))[:SHARD_LIMIT], desc="embedding shards"):
+    dataset_dir = Path(cfg["data"]["dataset_dir"])
+    shard_paths = sorted(dataset_dir.glob("shard-*.parquet"))
+    
+    if not shard_paths:
+        raise RuntimeError(f"no parquet shards found under {dataset_dir}.")
+   
+    for shard_path in tqdm(shard_paths[:SHARD_LIMIT], desc="embedding shards"):
         table = pq.read_table(str(shard_path), columns=["path", "jpeg"])
         for path, jpeg in zip(table["path"].to_pylist(), table["jpeg"].to_pylist()):
             batch.append(to_tensor(Image.open(io.BytesIO(jpeg)).convert("RGB")))
@@ -46,8 +51,8 @@ def embed_tiles(cfg):
                 batch = []
 
     if batch:
-        embeddings.append(embed_batch(batch, device, backbone, mean_t, std_t, image_size))
-
+        embeddings.append(embed_batch(batch, device, backbone, mean_t, std_t, image_size))    
+    
     return paths, np.concatenate(embeddings, axis=0)
 
 def build_embedding_model(cfg):
