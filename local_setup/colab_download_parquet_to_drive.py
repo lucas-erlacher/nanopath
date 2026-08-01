@@ -3,7 +3,7 @@ from huggingface_hub import HfApi, snapshot_download
 
 
 REPO_ID = "medarc/nanopath"
-DRIVE_DATASET_DIR = "/content/drive/MyDrive/nanopath_parquet"
+DRIVE_DATASET_DIR = "/content/drive/MyDrive/nanopath/nanopath_parquet"
 MAX_WORKERS = 4
 
 

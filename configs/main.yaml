@@ -20,6 +20,12 @@ data:
   hed_jitter: 0.12
   tissue_thresh: 0.5 # training rejects tiles unless this fraction of pixels has RGB saturation > 0.07
 
+prune:
+  embedding_model: dinov2_vits14_reg
+  embedding_model_batchsize: 256
+  embeddings_path: /content/drive/MyDrive/nanopath/tile_embeddings
+  weights_path:
+
 model:
   type: dinov2_vits14_reg
 
