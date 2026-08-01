@@ -1,16 +1,9 @@
-"""Run in Colab:
-%pip install -q huggingface_hub
-from google.colab import drive; drive.mount('/content/drive')
-%run /content/nanopath/local_setup/colab_download_parquet_to_drive.py
-"""
-
 from pathlib import Path
 from huggingface_hub import HfApi, snapshot_download
 
 
 REPO_ID = "medarc/nanopath"
 DRIVE_DATASET_DIR = "/content/drive/MyDrive/nanopath_parquet"
-DEBUG_MODE = True
 MAX_WORKERS = 4
 
 
@@ -20,7 +13,7 @@ def main():
 
     all_files = HfApi().list_repo_files(repo_id=REPO_ID, repo_type="dataset")
     all_shards = sorted(path for path in all_files if path.startswith("shard-") and path.endswith(".parquet"))
-    target_shards = all_shards[:2] if DEBUG_MODE else all_shards
+    target_shards = all_shards
     present_shards = {path.name for path in dataset_dir.glob("shard-*.parquet") if path.stat().st_size > 0}
     missing_shards = [name for name in target_shards if name not in present_shards]
 
