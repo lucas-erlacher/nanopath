@@ -42,8 +42,8 @@ def embed_tiles(cfg):
    
     for shard_path in tqdm(shard_paths[:SHARD_LIMIT], desc="embedding shards"):
         table = pq.read_table(str(shard_path), columns=["path", "jpeg"])
-            shard_rows = zip(table["path"].to_pylist(), table["jpeg"].to_pylist())
-            for path, jpeg in tqdm(shard_rows, total=table.num_rows, desc=shard_path.name, leave=False):
+        shard_rows = zip(table["path"].to_pylist(), table["jpeg"].to_pylist())
+        for path, jpeg in tqdm(shard_rows, total=table.num_rows, desc=shard_path.name, leave=False):
             batch.append(to_tensor(Image.open(io.BytesIO(jpeg)).convert("RGB")))
             paths.append(path)
 
