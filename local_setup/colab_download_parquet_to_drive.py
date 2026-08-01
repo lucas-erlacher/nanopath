@@ -1,8 +1,10 @@
-# run in colab: 
-# !pip install -q huggingface_hub && !python /content/nanopath/local_setup/colab_download_parquet_to_drive.py
+"""Run in Colab:
+%pip install -q huggingface_hub
+from google.colab import drive; drive.mount('/content/drive')
+%run /content/nanopath/local_setup/colab_download_parquet_to_drive.py
+"""
 
 from pathlib import Path
-from google.colab import drive
 from huggingface_hub import HfApi, snapshot_download
 
 
@@ -13,7 +15,6 @@ MAX_WORKERS = 4
 
 
 def main():
-    drive.mount("/content/drive")
     dataset_dir = Path(DRIVE_DATASET_DIR)
     dataset_dir.mkdir(parents=True, exist_ok=True)
 
