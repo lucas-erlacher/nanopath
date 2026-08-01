@@ -13,12 +13,13 @@ from tqdm import tqdm
 from model import DinoV2ViT, load_dinov2_pretrained
 from utils import assert_shape
 
-SHARD_LIMIT = 1
+SHARD_LIMIT = 2
 
 
 @torch.no_grad()
 def embed_tiles(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    image_size = int(cfg["train"]["global_size"])
     
     backbone = build_embedding_model(cfg).to(device).eval()
 
@@ -41,11 +42,11 @@ def embed_tiles(cfg):
             paths.append(path)
 
             if len(batch) == cfg["prune"]["embedding_model_batchsize"]:
-                embeddings.append(embed_batch(batch, device, backbone, mean_t, std_t))
+                embeddings.append(embed_batch(batch, device, backbone, mean_t, std_t, image_size))
                 batch = []
 
     if batch:
-        embeddings.append(embed_batch(batch, device, backbone, mean_t, std_t))
+        embeddings.append(embed_batch(batch, device, backbone, mean_t, std_t, image_size))
 
     return paths, np.concatenate(embeddings, axis=0)
 
@@ -57,11 +58,14 @@ def build_embedding_model(cfg):
     else:
         raise RuntimeError(f"configured model {model} is not supported")
 
-def embed_batch(batch, device, backbone, mean_t, std_t):
+def embed_batch(batch, device, backbone, mean_t, std_t, image_size):
     x = torch.stack(batch).to(device)
+    assert_shape(x, ["*", 3, image_size, image_size], "stacked batch")
+
     expected_shape = tuple(x.shape)
     x = (x - mean_t) / std_t  # uses broadcasting to apply mean and std to every pixel in every image in batch
     assert_shape(x, expected_shape, "preprocessed batch")
+    
     return backbone.probe_features(x).float().cpu().numpy()
 
 
