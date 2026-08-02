@@ -5,21 +5,29 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
-from sklearn.cluster import MiniBatchKMeans
+from sklearn.cluster import KMeans
 
-from utils import print_device
+from utils import assert_shape, print_device
 
 
-def load_embeddings(embed_path):
-    data = np.load(embed_path, allow_pickle=False)
-    return data["paths"].tolist(), data["embeddings"]
+def load_embeddings(embed_dir):
+    embed_paths = sorted(Path(embed_dir).glob("*.embeddings.npz"))
+    if not embed_paths:
+        raise RuntimeError(f"no embedding shards found under {embed_dir}")
+
+    paths, embeddings = [], []
+    for embed_path in embed_paths:
+        data = np.load(embed_path, allow_pickle=False)
+        paths.extend(data["paths"].tolist())
+        embeddings.append(data["embeddings"])
+
+    return paths, np.concatenate(embeddings, axis=0)
 
 
 def cluster_embeddings(embeddings, n_clusters, seed):
-    kmeans = MiniBatchKMeans(
+    kmeans = KMeans(
         n_clusters=n_clusters,
         random_state=seed,
-        batch_size=4096,
         n_init="auto",
     )
 
@@ -29,32 +37,53 @@ def cluster_embeddings(embeddings, n_clusters, seed):
     return labels, assigned_centroids
 
 
-def cosine_distance(embeddings, references):
-    embeddings = embeddings / np.linalg.norm(
-        embeddings, axis=1, keepdims=True
-    )
-    references = references / np.linalg.norm(
-        references, axis=1, keepdims=True
-    )
+# vectorized over the number of embeddings dimension
+def cosine_similarity(embeddings, centroids):
+    num_embeddings = embeddings.shape[0]
 
-    return 1.0 - np.sum(embeddings * references, axis=1)
+    # * denotes embedding dimensionality (e.g. 384)
+    assert_shape(embeddings, [num_embeddings, "*"], "embeddings")
+    assert_shape(centroids, [num_embeddings, "*"], "centroids")
+
+    matrix_elem_prod = embeddings * centroids  # elementwise product between 2 matrices
+    assert_shape(matrix_elem_prod, [num_embeddings, "*"], "matrix_elem_prod") 
+
+    dot_products = np.sum(matrix_elem_prod, axis=1) 
+    assert_shape(dot_products, [num_embeddings], "dot products")
+
+    embedding_norms = np.linalg.norm(embeddings, axis=1)
+    assert_shape(embedding_norms, [num_embeddings], "embedding norms")
+
+    centroid_norms = np.linalg.norm(centroids, axis=1)
+    assert_shape(centroid_norms, [num_embeddings], "centroid norms")
+    
+    normalizers = (embedding_norms * centroid_norms)  # element wise product
+    assert_shape(normalizers, [num_embeddings], "normalizer")
+
+    scores  = dot_products / normalizers  # element wise division
+    assert_shape(scores, [num_embeddings], "scores")
+
+    return scores 
 
 
 def main():
     print_device("score_tiles")
     cfg = yaml.safe_load(Path(sys.argv[1]).read_text())
-    pembed_batche_cfg = cfg["pembed_batche"]
+    embed_dir = Path(cfg["prune"]["embeddings_path"])
+    out_path = Path(cfg["prune"]["scores_path"])
 
-    embed_path = Path(pembed_batche_cfg["output_path"]).with_suffix(".embeds.npz")
-    paths, embeddings = load_embeddings(embed_path)
+    paths, embeddings = load_embeddings(embed_dir)
 
     cluster_labels, assigned_centroids = cluster_embeddings(
         embeddings,
-        pembed_batche_cfg["n_clusters"],
+        cfg["prune"]["num_clusters"],
         cfg["train"]["seed"],
     )
 
-    scores = cosine_distance(embeddings, assigned_centroids)
+    similarities = cosine_similarity(embeddings, assigned_centroids)
+    scores = 1.0 - similarities  # we want to encourage sampling of tiles that are dissimilar to their asigned centroids
+
+    print(scores[:10])
 
     out = pa.table(
         {
@@ -64,7 +93,8 @@ def main():
         }
     )
 
-    pq.write_table(out, pembed_batche_cfg["output_path"])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(out, out_path)
 
 
 if __name__ == "__main__":
