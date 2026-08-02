@@ -30,7 +30,7 @@ def embed_tiles(cfg):
     std_t = torch.tensor(cfg["data"]["std"], device=device).view(1, 3, 1, 1)
 
     dataset_dir = Path(cfg["data"]["dataset_dir"])
-    shard_paths = sorted(list(dataset_dir.glob("shard-*.parquet"))[:2])
+    shard_paths = sorted(list(dataset_dir.glob("shard-*.parquet")))
     
     if not shard_paths:
         raise RuntimeError(f"no parquet shards found under {dataset_dir}.")
