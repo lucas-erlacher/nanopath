@@ -25,7 +25,7 @@ prune:
   embedding_model_batchsize: 2048
   embeddings_path: /content/drive/MyDrive/nanopath/tile_embeddings/
   scores_path: /content/drive/MyDrive/nanopath/tile_scores.parquet
-  num_clusters: 8192
+  num_clusters: 128
 
 model:
   type: dinov2_vits14_reg
