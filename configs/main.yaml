@@ -22,7 +22,7 @@ data:
 
 prune:
   embedding_model: dinov2_vits14_reg
-  embedding_model_batchsize: 4096
+  embedding_model_batchsize: 2048
   embeddings_path: /content/drive/MyDrive/nanopath/tile_embeddings/
   weights_path:
 
