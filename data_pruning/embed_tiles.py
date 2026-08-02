@@ -35,11 +35,11 @@ def embed_tiles(cfg):
     if not shard_paths:
         raise RuntimeError(f"no parquet shards found under {dataset_dir}.")
 
-    embed_prefix = Path(cfg["prune"]["embeddings_path"])
-    embed_prefix.parent.mkdir(parents=True, exist_ok=True)
+    embed_dir = Path(cfg["prune"]["embeddings_path"])
+    embed_dir.mkdir(parents=True, exist_ok=True)
 
     for shard_path in tqdm(shard_paths, desc="embedding shards"):
-        shard_embed_path = embed_prefix.with_name(f"{embed_prefix.name}.{shard_path.stem}.embeddings.npz")
+        shard_embed_path = embed_dir / f"{shard_path.stem}.embeddings.npz"
         if shard_embed_path.exists():
             print(f"skip existing embeddings: {shard_embed_path}")
             continue
