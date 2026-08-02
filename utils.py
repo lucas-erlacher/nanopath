@@ -1,3 +1,13 @@
+import torch
+
+
+def print_device(script_name):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[{script_name}] device={device}")
+    if device.type == "cuda":
+        print(f"[{script_name}] gpu={torch.cuda.get_device_name(0)}")
+
+
 def assert_shape(tensor, expected_shape, tensor_name):
     actual_shape = tuple(tensor.shape)
     expected_shape = tuple(expected_shape)

@@ -11,7 +11,7 @@ from torchvision.transforms import v2
 from tqdm import tqdm
 
 from model import DinoV2ViT, load_dinov2_pretrained
-from utils import assert_shape
+from utils import assert_shape, print_device
 
 @torch.no_grad()
 def embed_tiles(cfg):
@@ -85,6 +85,7 @@ def embed_batch(batch, device, backbone, mean_t, std_t, image_size):
 
 
 def main():
+    print_device("embed_tiles")
     cfg = yaml.safe_load(Path(sys.argv[1]).read_text())
     embed_tiles(cfg)
 

@@ -7,6 +7,8 @@ import pyarrow.parquet as pq
 import yaml
 from sklearn.cluster import MiniBatchKMeans
 
+from utils import print_device
+
 
 def load_embeddings(embed_path):
     data = np.load(embed_path, allow_pickle=False)
@@ -39,6 +41,7 @@ def cosine_distance(embeddings, references):
 
 
 def main():
+    print_device("score_tiles")
     cfg = yaml.safe_load(Path(sys.argv[1]).read_text())
     pembed_batche_cfg = cfg["pembed_batche"]
 
