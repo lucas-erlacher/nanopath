@@ -13,9 +13,6 @@ from tqdm import tqdm
 from model import DinoV2ViT, load_dinov2_pretrained
 from utils import assert_shape
 
-SHARD_LIMIT = 1
-
-
 @torch.no_grad()
 def embed_tiles(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -32,15 +29,22 @@ def embed_tiles(cfg):
     mean_t = torch.tensor(cfg["data"]["mean"], device=device).view(1, 3, 1, 1)  # insert singleton dims to enable broadcasting 
     std_t = torch.tensor(cfg["data"]["std"], device=device).view(1, 3, 1, 1)
 
-    paths, batch, embeddings = [], [], []
-
     dataset_dir = Path(cfg["data"]["dataset_dir"])
     shard_paths = sorted(dataset_dir.glob("shard-*.parquet"))
     
     if not shard_paths:
         raise RuntimeError(f"no parquet shards found under {dataset_dir}.")
-   
-    for shard_path in tqdm(shard_paths[:SHARD_LIMIT], desc="embedding shards"):
+
+    embed_prefix = Path(cfg["prune"]["embeddings_path"])
+    embed_prefix.parent.mkdir(parents=True, exist_ok=True)
+
+    for shard_path in tqdm(shard_paths, desc="embedding shards"):
+        shard_embed_path = embed_prefix.with_name(f"{embed_prefix.name}.{shard_path.stem}.embeddings.npz")
+        if shard_embed_path.exists():
+            print(f"skip existing embeddings: {shard_embed_path}")
+            continue
+
+        paths, batch, embeddings = [], [], []
         table = pq.read_table(str(shard_path), columns=["path", "jpeg"])
         shard_rows = zip(table["path"].to_pylist(), table["jpeg"].to_pylist())
         for path, jpeg in tqdm(shard_rows, total=table.num_rows, desc=shard_path.name, leave=False):
@@ -51,10 +55,15 @@ def embed_tiles(cfg):
                 embeddings.append(embed_batch(batch, device, backbone, mean_t, std_t, image_size))
                 batch = []
 
-    if batch:
-        embeddings.append(embed_batch(batch, device, backbone, mean_t, std_t, image_size))    
-    
-    return paths, np.concatenate(embeddings, axis=0)
+        if batch:
+            embeddings.append(embed_batch(batch, device, backbone, mean_t, std_t, image_size))
+
+        np.savez_compressed(
+            shard_embed_path,
+            paths=np.asarray(paths),
+            embeddings=np.concatenate(embeddings, axis=0).astype(np.float32),
+        )
+        print(f"saved embeddings to {shard_embed_path}")
 
 def build_embedding_model(cfg):
     model = cfg["prune"]["embedding_model"]
@@ -77,14 +86,7 @@ def embed_batch(batch, device, backbone, mean_t, std_t, image_size):
 
 def main():
     cfg = yaml.safe_load(Path(sys.argv[1]).read_text())
-
-    paths, embeddings = embed_tiles(cfg)
-
-    embed_path = Path(cfg["prune"]["embeddings_path"]).with_suffix(".embeddings.npz")
-    embed_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(embed_path, paths=np.asarray(paths), embeddings=embeddings.astype(np.float32))
-
-    print(f"saved embeddings to {embed_path}")
+    embed_tiles(cfg)
 
 
 if __name__ == "__main__":
