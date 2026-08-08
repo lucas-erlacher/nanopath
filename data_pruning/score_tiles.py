@@ -21,7 +21,7 @@ def load_embeddings(embed_dir):
         paths.extend(data["paths"].tolist())
         embeddings.append(data["embeddings"])
 
-    return paths[:10], np.concatenate(embeddings[:10], axis=0)
+    return paths, np.concatenate(embeddings, axis=0)
 
 
 def cluster_embeddings(embeddings, n_clusters, seed):
@@ -82,8 +82,6 @@ def main():
 
     similarities = cosine_similarity(embeddings, assigned_centroids)
     scores = 1.0 - similarities  # we want to encourage sampling of tiles that are dissimilar to their asigned centroids
-
-    print(scores[:10])
 
     out = pa.table(
         {
