@@ -21,7 +21,7 @@ def load_embeddings(embed_dir):
         paths.extend(data["paths"].tolist())
         embeddings.append(data["embeddings"])
 
-    return paths, np.concatenate(embeddings, axis=0)
+    return paths, np.concatenate(embeddings[:10], axis=0)
 
 
 def cluster_embeddings(embeddings, n_clusters, seed):
