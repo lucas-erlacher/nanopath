@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -16,10 +17,11 @@ def load_embeddings(embed_dir):
         raise RuntimeError(f"no embedding shards found under {embed_dir}")
 
     paths, embeddings = [], []
-    for embed_path in embed_paths:
+    for shard_index, embed_path in enumerate(embed_paths, start=1):
         data = np.load(embed_path, allow_pickle=False)
         paths.extend(data["paths"].tolist())
         embeddings.append(data["embeddings"])
+        print(f"loaded embedding shard {shard_index}/{len(embed_paths)}: {embed_path.name}", flush=True)
 
     return paths, np.concatenate(embeddings, axis=0)
 
@@ -29,9 +31,12 @@ def cluster_embeddings(embeddings, n_clusters, seed):
         n_clusters=n_clusters,
         random_state=seed,
         n_init="auto",
+        verbose=1,
     )
 
+    print(f"starting KMeans: rows={len(embeddings):,} clusters={n_clusters:,}", flush=True)
     labels = kmeans.fit_predict(embeddings)
+    print(f"finished KMeans after {kmeans.n_iter_} iterations", flush=True)
     assigned_centroids = kmeans.cluster_centers_[labels]
 
     return labels, assigned_centroids
@@ -72,7 +77,9 @@ def main():
     embed_dir = Path(cfg["prune"]["embeddings_path"])
     out_path = Path(cfg["prune"]["scores_path"])
 
+    started = time.monotonic()
     paths, embeddings = load_embeddings(embed_dir)
+    print(f"loaded {len(paths):,} embeddings in {time.monotonic() - started:.1f}s", flush=True)
 
     cluster_labels, assigned_centroids = cluster_embeddings(
         embeddings,
@@ -82,6 +89,7 @@ def main():
 
     similarities = cosine_similarity(embeddings, assigned_centroids)
     scores = 1.0 - similarities  # we want to encourage sampling of tiles that are dissimilar to their asigned centroids
+    print("computed scores; writing parquet", flush=True)
 
     out = pa.table(
         {
@@ -93,6 +101,7 @@ def main():
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(out, out_path)
+    print(f"wrote {out_path} in {time.monotonic() - started:.1f}s", flush=True)
 
 
 if __name__ == "__main__":
