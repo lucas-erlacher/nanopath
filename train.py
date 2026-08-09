@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 import yaml
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.flop_counter import FlopCounterMode
 
 from dataloader import TCGATileDataset, TILE_SIZE
@@ -356,7 +356,11 @@ def main():
     loader_kwargs = dict(batch_size=batch_size, drop_last=True, num_workers=train_cfg["num_workers"], pin_memory=True,
                          prefetch_factor=train_cfg["prefetch_factor"] if train_cfg["num_workers"] > 0 else None,
                          persistent_workers=train_cfg["persistent_workers"] and train_cfg["num_workers"] > 0)
-    train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
+    # train loader
+    # if prune.sampling_intensity is 0 score-based sampling is disabled (i.e. WeightedRandomSampler does not always have effect)
+    sampler = WeightedRandomSampler(train_ds.sample_weights, len(train_ds), replacement=True)
+    train_loader = DataLoader(train_ds, sampler=sampler, **loader_kwargs)
+    # val loader
     val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
 
     activation_checkpointing = bool(train_cfg["activation_checkpointing"])

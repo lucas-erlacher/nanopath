@@ -93,7 +93,9 @@ class TCGATileDataset(Dataset):
     def __init__(self, cfg, is_train=True):
         data = cfg["data"]
         train = cfg["train"]
-        
+        prune = cfg["prune"]
+        sampling_intensity = float(prune["sampling_intensity"])
+
         self.tissue_thresh = float(data["tissue_thresh"]) if is_train else 0.0
         dataset_dir = Path(data["dataset_dir"])
         self.shards = sorted(dataset_dir.glob("shard-*.parquet"))
@@ -112,14 +114,12 @@ class TCGATileDataset(Dataset):
         # the JPEG bytes column stays on disk until __getitem__.
         in_split_shard = []
         in_split_row = []
+        split_scores = []  
 
-        prune = cfg["prune"]
-        pruning_percentage = float(prune["pruning_percentage"]) if is_train else 0.0
-        if pruning_percentage > 0.0:
-            # compute weight-threshold (n-th percentile of tile-weights) 
-            score_table = pq.read_table(str(prune["scores_path"]), columns=["path", "score"])
-            scores = dict(zip(score_table["path"].to_pylist(), score_table["score"].to_pylist()))
-            score_threshold = float(np.quantile(score_table["score"].to_numpy(), pruning_percentage))
+        score_table = pq.read_table(str(prune["scores_path"]), columns=["path", "score"])
+        # embed_tiles.py keeps paths aligned with embeddings, and score_tiles.py keeps
+        # those paths aligned with scores - hence we can create the path to score lookup dict in the following (simple) way
+        path_to_score = dict(zip(score_table["path"].to_pylist(), score_table["score"].to_pylist()))
 
         for shard_idx, shard_path in enumerate(self.shards):
             paths = pq.read_table(str(shard_path), columns=["path"], memory_map=True)["path"].to_pylist()
@@ -127,17 +127,22 @@ class TCGATileDataset(Dataset):
                 # XOR with is_train: training keeps tiles where patient_in_val is False,
                 # validation keeps the complement.
                 if patient_in_val(patient_id_from_relpath(p), data["split_seed"], data["val_fraction"]) != is_train:
-                    
-                    if pruning_percentage > 0.0 and scores[p] < score_threshold:
-                        continue
-
                     in_split_shard.append(shard_idx)
                     in_split_row.append(row_idx)
+                    # precisely load score by path
+                    split_scores.append(path_to_score[p])
         if not in_split_shard:
             raise ValueError(f"no {'train' if is_train else 'val'} tiles found in {dataset_dir}; check val_fraction={data['val_fraction']}")
         # Two parallel int32 arrays (~32 MB total for 4M tiles) shared COW across DataLoader fork-workers.
         self.shard_of = np.asarray(in_split_shard, dtype=np.int32)
         self.row_of = np.asarray(in_split_row, dtype=np.int32)
+        # finalize score-sampling distribution
+        if is_train:
+            uniform_distribution = torch.full((len(self),), 1.0 / len(self), dtype=torch.float64)
+            scores = torch.tensor(split_scores, dtype=torch.float64)
+            score_distribution = scores / scores.sum()  # turn raw scores into probability distribution
+            # linearly interpolate between score-distribution and uniform-distribution
+            self.sample_weights = torch.lerp(uniform_distribution, score_distribution, sampling_intensity)
         mean, std = data["mean"], data["std"]
         self.global_views = int(train["global_views"])
         self.local_views = int(train["local_views"])
