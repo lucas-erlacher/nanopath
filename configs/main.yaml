@@ -26,6 +26,7 @@ prune:
   embeddings_path: /content/drive/MyDrive/nanopath/tile_embeddings/
   scores_path: /content/drive/MyDrive/nanopath/tile_scores.parquet
   num_clusters: 128
+  pruning_percentage: 0.9  # 0.8 keeps the top 20% highest-score tiles
 
 model:
   type: dinov2_vits14_reg
