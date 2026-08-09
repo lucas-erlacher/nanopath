@@ -64,6 +64,11 @@ def patient_id_from_relpath(rel):
     return "-".join(rel.split("/", 1)[0].split("-")[:3])
 
 
+def tissue_fraction(tile):
+    saturation = (tile.amax(0) - tile.amin(0)) / (tile.amax(0) + 1e-6)
+    return float((saturation > 0.07).float().mean())
+
+
 # Lightweight stain-space jitter; this is the stain augmentation hook for pretraining tiles.
 class HEDJitter(nn.Module):
     # Store conversion matrices as buffers so transforms move with the module dtype/device if needed.
@@ -200,8 +205,7 @@ class TCGATileDataset(Dataset):
                 tile = self.to_tensor(img.convert("RGB"))
             if self.tissue_thresh <= 0:
                 break
-            sat = (tile.amax(0) - tile.amin(0)) / (tile.amax(0) + 1e-6)
-            if float((sat > 0.07).float().mean()) >= self.tissue_thresh:
+            if tissue_fraction(tile) >= self.tissue_thresh:
                 break
             idx = random.randint(0, self.shard_of.shape[0] - 1)
         slide_stem = rel.split("/", 1)[0]
