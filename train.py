@@ -255,10 +255,8 @@ def main():
         wandb_name = json.loads(Path(labless_autosubmit_file).read_text()).get("run_name") or wandb_name
     slurm_job_id = os.environ.get("SLURM_JOB_ID")
     latest_checkpoint_path = output_dir / "latest.pt"
-    # Fresh launches always start from scratch and wipe output_dir.
+    # each experiment run gets its own output_dir, so fresh launches do not wipe existing runs.
     resume_path = Path(train_cfg["resume"]) if train_cfg["resume"] else None
-    if resume_path is None and output_dir.exists():
-        shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     wandb_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.jsonl"
@@ -281,7 +279,8 @@ def main():
         train_flops = int(checkpoint["train_flops"])
         wandb_meta = dict(checkpoint["wandb"])
     wandb_init = {
-        "project": "nanopath",
+        "entity": cfg["project"]["wandb_entity"],
+        "project": cfg["project"]["wandb_project"],
         "name": wandb_name,
         "dir": str(wandb_dir),
         "config": cfg,
@@ -344,7 +343,7 @@ def main():
         target = source_snapshot_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
-    wandb_meta = {"entity": wandb_run.entity, "project": "nanopath", "id": wandb_run.id, "name": wandb_name, "url": wandb_run.url,
+    wandb_meta = {"entity": wandb_run.entity, "project": cfg["project"]["wandb_project"], "id": wandb_run.id, "name": wandb_name, "url": wandb_run.url,
                   "mode": getattr(wandb_run.settings, "mode", ""), "source_artifact": source_id,
                   "source_dir": str(source_snapshot_dir), "git": {"commit": git_commit, "remote": git_remote}}
     train_ds = TCGATileDataset(cfg, is_train=True)

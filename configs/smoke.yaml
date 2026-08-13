@@ -2,13 +2,15 @@ project:
   name: smoke-dinov2
   family: nanopath
   recipe_id: dinov2-vits14-reg-kde
-  output_dir: /data/$USER/nanopath/main/smoke
+  wandb_entity: lucaserlacher
+  wandb_project: nanopath
+  output_dir: /content/drive/MyDrive/nanopath/runs/smoke
   wandb_dir: /data/$USER/nanopath/wandb
 
 data:
   # dataset_dir holds the parquet shards (shard-NNNNN.parquet) that train.py reads.
   # `prepare.py … download=True` populates it from the medarc/nanopath HF mirror.
-  dataset_dir: /data/nanopath_parquet
+  dataset_dir: /content/drive/MyDrive/nanopath/nanopath_parquet
   split_seed: 42
   val_fraction: 0.05
   mean: [0.485, 0.456, 0.406]
@@ -19,6 +21,15 @@ data:
   color_jitter_saturation: 0.4
   hed_jitter: 0.12
   tissue_thresh: 0.5 # training rejects tiles unless this fraction of pixels has RGB saturation > 0.07
+
+prune:
+  embedding_model: dinov2_vits14_reg
+  embedding_model_batchsize: 2048
+  embeddings_path: /content/drive/MyDrive/nanopath/tile_embeddings/
+  scores_path: /content/drive/MyDrive/nanopath/tile_scores.parquet
+  num_clusters: 128
+  sampling_intensity: 0.5
+  cut_score: 0.3
 
 model:
   type: dinov2_vits14_reg
@@ -31,8 +42,8 @@ train:
   num_workers: 16
   prefetch_factor: 2
   persistent_workers: true
-  max_train_samples: 1000000 # full-run sample cap; smoke normally reaches max_train_flops first
-  max_train_flops: 5000000000000000 # 5.0e15 — short enough to finish in a few minutes
+  max_train_samples: 2048
+  max_train_flops: 100000000000000 # 1.0e14 — a very short training sanity check
   log_every: 5
   # Smoke leaves no persistent checkpoints; final probes still use a temporary checkpoint.
   save_every: null
@@ -60,7 +71,7 @@ dino:
   kde_concentration: 10.0
 
 probe:
-  enabled: true
+  enabled: false
   model_weights: ema
   count: 1
   datasets:

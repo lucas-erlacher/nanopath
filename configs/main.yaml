@@ -2,7 +2,9 @@ project:
   name: main-dinov2
   family: nanopath
   recipe_id: dinov2-vits14-reg-kde
-  output_dir: /data/$USER/nanopath/main/default
+  wandb_entity: lucaserlacher
+  wandb_project: nanopath
+  output_dir: /content/drive/MyDrive/nanopath/runs/main
   wandb_dir: /data/$USER/nanopath/wandb
 
 data:
