@@ -140,9 +140,12 @@ class TCGATileDataset(Dataset):
         if is_train:
             uniform_distribution = torch.full((len(self),), 1.0 / len(self), dtype=torch.float64)
             scores = torch.tensor(split_scores, dtype=torch.float64)
+            removal_mask = scores > float(prune["cut_score"])
+            scores[removal_mask] = 0  # already set to zero s.t. the sum is not perturbed by tiles that will not be part of training
             score_distribution = scores / scores.sum()  # turn raw scores into probability distribution
             # linearly interpolate between score-distribution and uniform-distribution
             self.sample_weights = torch.lerp(uniform_distribution, score_distribution, sampling_intensity)
+            self.sample_weights[removal_mask] = 0  # set to zero s.t. these tiles are not part of training
         mean, std = data["mean"], data["std"]
         self.global_views = int(train["global_views"])
         self.local_views = int(train["local_views"])
