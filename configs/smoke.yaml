@@ -43,7 +43,7 @@ train:
   prefetch_factor: 2
   persistent_workers: true
   max_train_samples: 2048
-  max_train_flops: 100000000000000 # 1.0e14 — a very short training sanity check
+  max_train_flops: 1000000000000 # 1.0e12 — a very short training sanity check
   log_every: 5
   # Smoke leaves no persistent checkpoints; final probes still use a temporary checkpoint.
   save_every: null
