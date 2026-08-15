@@ -4,6 +4,7 @@ project:
   recipe_id: dinov2-vits14-reg-kde
   wandb_entity: lucaserlacher_research
   wandb_project: nanopath
+  labless_autosubmit: false
   output_dir: ""  # overwritten by colab cell
   wandb_dir: /content/wandb
 

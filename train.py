@@ -73,6 +73,8 @@ def load_config():
 # no-scope GitHub device login path as the SLURM launcher. Noninteractive runs
 # train locally unless the launcher passed a preauthorized token file.
 def maybe_arm_labless_autosubmit(cfg, repo_dir):
+    if not cfg["project"]["labless_autosubmit"]:
+        return ""
     token_path = os.environ.get("LABLESS_AUTOSUBMIT_FILE", "")
     eligible = (
         bool(cfg["probe"]["enabled"])
