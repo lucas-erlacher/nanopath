@@ -662,7 +662,14 @@ def main():
                 with metrics_path.open("a") as handle:
                     handle.write(json.dumps(val_log) + "\n")
                 wandb_run.log({f"val/{k}": v for k, v in val.items()}, step=completed_step)
-                print(f"{console_prefix()} Validation  [{completed_step}]  total: {val['total']:.4f}  dino: {val['dino']:.4f}  ibot: {val['ibot']:.4f}  kde: {val['kde']:.4f}", flush=True)
+                print(
+                    f"{console_prefix()} Validation  [{completed_step}]  "
+                    f"compute budget: {100.0 * train_flops / max_train_flops:.1f}%  "
+                    f"samples: {100.0 * examples_seen / max_train_samples:.1f}%  "
+                    f"total: {val['total']:.4f}  dino: {val['dino']:.4f}  "
+                    f"ibot: {val['ibot']:.4f}  kde: {val['kde']:.4f}",
+                    flush=True,
+                )
                 # Reset rate clocks after validation so the next train log is train-rate only.
                 last_console_step, last_console_monotonic = completed_step, time.monotonic()
                 last_time, last_examples, last_visible_patch_presentations, last_train_flops = time.time(), examples_seen, visible_patch_presentations, train_flops
