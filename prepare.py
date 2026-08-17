@@ -317,7 +317,7 @@ def hf_probe_dir(name, root):
     from huggingface_hub import snapshot_download
     workers = int(os.environ.get("PREPARE_WORKERS", os.cpu_count() or 8))
     print(f"  using medarc/nanopath probe mirror: {name}", flush=True)
-    snapshot_download(repo_id=HF_REPO_ID, repo_type="dataset", local_dir=str(root), allow_patterns=[f"{HF_PROBE_PREFIX}/{name}/**"], max_workers=workers)
+    snapshot_download(repo_id=HF_REPO_ID, repo_type="dataset", local_dir=str(root), allow_patterns=[f"{HF_PROBE_PREFIX}/{name}/*"], max_workers=workers)
     src = root / HF_PROBE_PREFIX / name
     for p in src.iterdir():
         dst = root / p.name
