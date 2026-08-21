@@ -213,23 +213,13 @@ def update_ema(student_module, teacher_module, momentum):
 
 
 def stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples):
-    next_step = step + 1
     if stop_step is not None and step >= stop_step:
-        reason = "stop_step"
-    elif train_flops >= max_train_flops:
-        reason = "max_train_flops"
-    elif examples_seen + batch_size > max_train_samples:
-        reason = "max_train_samples"
-    else:
-        reason = None
-    print(
-        f"{console_prefix()} Stopping check  step={step} next_step={next_step} "
-        f"stop_step={stop_step} train_flops={train_flops}/{max_train_flops} "
-        f"examples_seen={examples_seen} next_examples={examples_seen + batch_size}/{max_train_samples} "
-        f"decision={reason or 'continue'}",
-        flush=True,
-    )
-    return reason
+        return "stop_step"
+    if train_flops >= max_train_flops:
+        return "max_train_flops"
+    if examples_seen + batch_size > max_train_samples:
+        return "max_train_samples"
+    return None
 
 
 # Orchestrates one pretraining run: setup, train+probe loop, checkpoint, summary.
