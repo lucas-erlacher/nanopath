@@ -903,21 +903,6 @@ def main():
     cfg = yaml.safe_load(os.path.expandvars(config_path.read_text()))
     paths = get_paths(cfg)
     dataset_dir = paths["data.dataset_dir"]
-    shards = list(dataset_dir.glob("shard-*.parquet")) if dataset_dir.exists() else []
-
-    # Stage 1 — Parquet tile shards (default source: medarc/nanopath HF dataset).
-    if len(shards) == NUM_SHARDS:
-        print(f"[verify] tiles: {dataset_dir} ({len(shards)} shards)", flush=True)
-    elif not download:
-        raise SystemExit(
-            f"expected {NUM_SHARDS} parquet shards under {dataset_dir}, found {len(shards)}.\n"
-            f"Either fix data.dataset_dir in {config_label} to point at an existing prepared "
-            f"dataset, or rerun: {prepare_cmd}"
-        )
-    else:
-        dataset_dir.mkdir(parents=True, exist_ok=True)
-        fetch_tiles_from_hf(dataset_dir)
-        assert sum(1 for _ in dataset_dir.glob("shard-*.parquet")) == NUM_SHARDS, f"tiles still incomplete after fetch: {dataset_dir}"
 
     # Stage 2 — probe datasets. Verify-only collects every gap and reports
     # them all at once so the user fixes the YAML in a single edit.
