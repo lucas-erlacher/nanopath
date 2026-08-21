@@ -212,6 +212,16 @@ def update_ema(student_module, teacher_module, momentum):
         bt.copy_(bs)
 
 
+def stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples):
+    if stop_step is not None and step >= stop_step:
+        return "stop_step"
+    if train_flops >= max_train_flops:
+        return "max_train_flops"
+    if examples_seen + batch_size > max_train_samples:
+        return "max_train_samples"
+    return None
+
+
 # Orchestrates one pretraining run: setup, train+probe loop, checkpoint, summary.
 def main():
     cfg = load_config()
@@ -221,6 +231,7 @@ def main():
     dino_cfg = cfg["dino"]
     save_every = train_cfg["save_every"]
     save_checkpoints = save_every is not None
+    stop_step = train_cfg["stop_step"]
     device = torch.device("cuda")
     random.seed(train_cfg["seed"])
     np.random.seed(train_cfg["seed"])
@@ -247,9 +258,11 @@ def main():
     step = 0
     batch_size = int(train_cfg["batch_size"])
     max_train_samples = int(train_cfg["max_train_samples"])
+    max_train_flops = int(train_cfg["max_train_flops"])
     examples_seen = 0
     visible_patch_presentations = 0
     train_flops = 0
+
     output_dir = Path(cfg["project"]["output_dir"])
     wandb_dir = Path(cfg["project"]["wandb_dir"])
     wandb_name = cfg["project"]["name"]
@@ -482,7 +495,6 @@ def main():
         next_probe_idx += 1
 
     log_probe_results()
-    max_train_flops = int(train_cfg["max_train_flops"])
     warmup_train_samples = math.ceil(max_train_samples * dino_cfg["warmup_fraction"])
     # Probe targets are sample milestones: one tile counts once even with many global/local crops.
     probe_count = int(cfg["probe"]["count"]) if probe_enabled(cfg) else 0
@@ -506,9 +518,9 @@ def main():
     # 1e18 leaderboard cap reflects real GPU work.
     measured_flops_per_step = None
 
-    while examples_seen + batch_size <= max_train_samples and train_flops < max_train_flops:
+    while stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples) is None:
         for batch in train_loader:
-            if examples_seen + batch_size > max_train_samples or train_flops >= max_train_flops:
+            if stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples) is not None:
                 break
             batch_started_at = time.monotonic()
             data_seconds = batch_started_at - data_wait_started_at
@@ -675,10 +687,13 @@ def main():
                 last_time, last_examples, last_visible_patch_presentations, last_train_flops = time.time(), examples_seen, visible_patch_presentations, train_flops
             step = completed_step
             data_wait_started_at = time.monotonic()
-            if train_flops >= max_train_flops or examples_seen + batch_size > max_train_samples:
+            if stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples) is not None:
                 break
+    
+    ########  TRAINING OVER  ########
+
     train_loop_wall_seconds = time.monotonic() - train_loop_started_at
-    stop_reason = "max_train_flops" if train_flops >= max_train_flops else "max_train_samples"
+    stop_reason = stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples)
     final_unique_counts = flush_unique_counts()
     if step > 0:
         # Final probes have their own readers; close pretraining workers before they compete for CPU/IO.
@@ -686,9 +701,8 @@ def main():
             if train_loader._iterator is not None:
                 train_loader._iterator._shutdown_workers()
                 train_loader._iterator = None
-        # Probes get their own short-lived checkpoint via run_probe_at; only persist latest.pt
-        # at end-of-run when periodic saving is on (save_every set) so smoke runs leave nothing.
-        if save_checkpoints and step != last_saved_step:
+        # Probes get their own short-lived checkpoint; retain the full checkpoint for resume/submission.
+        if step != last_saved_step:
             save_latest_checkpoint(step)
         run_probe_at(step, examples_seen)
     log_probe_results()
@@ -706,6 +720,7 @@ def main():
         "max_train_flops": max_train_flops,
         "train_loop_wall_seconds": train_loop_wall_seconds,
         "stop_reason": stop_reason,
+        "stop_step": stop_step,
         "steps_completed": step,
         "tile_presentations": examples_seen,
         "visible_patch_presentations": visible_patch_presentations,

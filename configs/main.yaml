@@ -50,6 +50,7 @@ train:
   # Validation pass every `eval_every` steps over `val_batches` held-out batches
   eval_every: 200
   val_batches: 16
+  stop_step: 14600 # optional optimizer step; null runs to the declared flops cap
   global_views: 2
   local_views: 8
   global_size: 224

@@ -238,7 +238,8 @@ The checked-in `#SBATCH --partition=n` / `--qos=normal` lines are MedARC-specifi
 - labless source snapshot: `project.output_dir/labless_source`.
 - labless submission payload: `project.output_dir/labless_submission.json`.
 - labless auto-submit token: `${project.output_dir}.labless_autosubmit.json` while a prompt-armed SLURM job is running; the launcher removes it after the post-run submission attempt.
-- checkpoints: rolling `latest.pt` written every `train.save_every` steps under `project.output_dir`, plus one final save at end of run. `save_every: null` (smoke) disables both; probes always get their own short-lived checkpoint regardless.
+- checkpoints: rolling `latest.pt` written every `train.save_every` steps under `project.output_dir`, plus one final save after any non-empty run. 
+- submission: set `train.stop_step` to stop early; probes still follow `probe.enabled`.
 
 ## Experiment log
 

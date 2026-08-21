@@ -50,6 +50,7 @@ train:
   save_every: null
   eval_every: 50
   val_batches: 4
+  stop_step: 500 # optional optimizer step; null runs to the declared flops cap
   global_views: 2
   local_views: 8
   global_size: 224
@@ -72,7 +73,7 @@ dino:
   kde_concentration: 10.0
 
 probe:
-  enabled: false
+  enabled: true  # debug test runs also need to test final probing
   model_weights: ema
   count: 1
   datasets:
