@@ -44,6 +44,8 @@ from PIL import Image, ImageDraw
 REPO_ROOT = Path(__file__).resolve().parent
 HF_REPO_ID = "medarc/nanopath"
 HF_PROBE_PREFIX = "probes"
+HF_DOWNLOAD_WORKERS = 1
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 PROBE_ACCESS_NOTICES = {
     "consep": "you MUST satisfy the official CoNSeP/Warwick access terms at https://warwick.ac.uk/fac/sci/dcs/research/tia/data/hovernet/ before using these data; this mirror download is only for portable setup.",
     "mhist": "you MUST complete MHIST's Dataset Research Use Agreement at https://bmirds.github.io/MHIST/ before using these data; this mirror download is only for portable setup.",
@@ -247,7 +249,7 @@ def pack_from_jpeg_dir(jpeg_dir, manifest_path, out_dir):
 def fetch_tiles_from_hf(dataset_dir):
     from huggingface_hub import snapshot_download
     started = time.monotonic()
-    workers = int(os.environ.get("PREPARE_WORKERS", os.cpu_count() or 8))
+    workers = HF_DOWNLOAD_WORKERS
     print(f"downloading parquet shards from huggingface.co/datasets/{HF_REPO_ID} -> {dataset_dir} ({workers} workers)", flush=True)
     snapshot_download(
         repo_id=HF_REPO_ID,
@@ -315,7 +317,7 @@ def hf_download(filename, dst):
 
 def hf_probe_dir(name, root):
     from huggingface_hub import snapshot_download
-    workers = int(os.environ.get("PREPARE_WORKERS", os.cpu_count() or 8))
+    workers = HF_DOWNLOAD_WORKERS
     print(f"  using medarc/nanopath probe mirror: {name}", flush=True)
     snapshot_download(
         repo_id=HF_REPO_ID,
