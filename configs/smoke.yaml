@@ -50,7 +50,7 @@ train:
   save_every: null
   eval_every: 50
   val_batches: 4
-  stop_step: 500 # optional optimizer step; null runs to the declared flops cap
+  stop_step: 50000 # optional optimizer step; null runs to the declared flops cap
   global_views: 2
   local_views: 8
   global_size: 224
