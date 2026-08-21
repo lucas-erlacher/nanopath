@@ -43,8 +43,8 @@ train:
   num_workers: 16
   prefetch_factor: 2
   persistent_workers: true
-  max_train_samples: 100000000000000  # set large number of samples s.t. stop_steps dictates training end (optimizer_steps = num_samples / batch_size)
-  max_train_flops: 1000000000000 # 1.0e12 — a very short training sanity check
+  max_train_samples: 1000000 # same as main as we use stop_step to end early 
+  max_train_flops: 1000000000000000000  # same as main as we use stop_step to end early 
   log_every: 5
   # Smoke leaves no persistent checkpoints; final probes still use a temporary checkpoint.
   save_every: null
