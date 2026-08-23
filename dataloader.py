@@ -116,7 +116,8 @@ class TCGATileDataset(Dataset):
         in_split_row = []
         split_scores = []  
 
-        score_table = pq.read_table(str(prune["scores_path"]), columns=["path", "score"])
+        scores_path = Path(prune["scores_path"]) / Path(prune["embedding_model"]) /  Path("tile_scores.parquet")
+        score_table = pq.read_table(str(scores_path), columns=["path", "score"])
         # embed_tiles.py keeps paths aligned with embeddings, and score_tiles.py keeps
         # those paths aligned with scores - hence we can create the path to score lookup dict in the following (simple) way
         path_to_score = dict(zip(score_table["path"].to_pylist(), score_table["score"].to_pylist()))

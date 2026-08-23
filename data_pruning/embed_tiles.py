@@ -26,8 +26,8 @@ def embed_tiles(cfg):
     ])
         
     # batch_dim, rgb_dim, height, width
-    mean_t = torch.tensor(cfg["data"]["mean"], device=device).view(1, 3, 1, 1)  # insert singleton dims to enable broadcasting 
-    std_t = torch.tensor(cfg["data"]["std"], device=device).view(1, 3, 1, 1)
+    mean_t = torch.tensor(cfg["prune"]["embedding_mean"], device=device).view(1, 3, 1, 1)  # insert singleton dims to enable broadcasting
+    std_t = torch.tensor(cfg["prune"]["embedding_std"], device=device).view(1, 3, 1, 1)
 
     dataset_dir = Path(cfg["data"]["dataset_dir"])
     shard_paths = sorted(list(dataset_dir.glob("shard-*.parquet")))
@@ -35,7 +35,7 @@ def embed_tiles(cfg):
     if not shard_paths:
         raise RuntimeError(f"no parquet shards found under {dataset_dir}.")
 
-    embed_dir = Path(cfg["prune"]["embeddings_path"])
+    embed_dir = Path(cfg["prune"]["embeddings_path"]) / Path(cfg["prune"]["embedding_model"])
     embed_dir.mkdir(parents=True, exist_ok=True)
 
     for shard_path in tqdm(shard_paths, desc="embedding shards"):
@@ -70,6 +70,10 @@ def build_embedding_model(cfg):
 
     if model == "dinov2_vits14_reg":
         return load_dinov2_pretrained(DinoV2ViT(variant="dinov2_vits14_reg"))
+    elif model == "kaiko_vits16":
+        backbone = torch.hub.load("kaiko-ai/towards_large_pathology_fms", "vits16", trust_repo=True)
+        backbone.probe_features = backbone.forward
+        return backbone
     else:
         raise RuntimeError(f"configured model {model} is not supported")
 

@@ -26,10 +26,12 @@ data:
   tissue_thresh: 0.5 # training rejects tiles unless this fraction of pixels has RGB saturation > 0.07
 
 prune:
-  embedding_model: dinov2_vits14_reg
+  embedding_model: kaiko_vits16  # [dinov2_vits14_reg, kaiko_vits16]
+  embedding_mean: [0.5, 0.5, 0.5]
+  embedding_std: [0.5, 0.5, 0.5]
   embedding_model_batchsize: 2048
   embeddings_path: /content/drive/MyDrive/nanopath/tile_embeddings/
-  scores_path: /content/drive/MyDrive/nanopath/tile_scores.parquet
+  scores_path: /content/drive/MyDrive/nanopath/tile_scores/
   num_clusters: 128
   sampling_intensity: 0.5  # 0 is uniform sampling, 1 is fully score-weighted
   cut_score: 0.7  # scores above this value are removed from training

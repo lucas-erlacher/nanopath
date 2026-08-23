@@ -10,8 +10,8 @@ from sklearn.cluster import KMeans
 from utils import assert_shape, print_device
 
 
-def load_embeddings(embed_dir):
-    embed_paths = sorted(Path(embed_dir).glob("*.embeddings.npz"))
+def load_embeddings(embed_dir, cfg):
+    embed_paths = sorted((Path(embed_dir) / Path(cfg["prune"]["embedding_model"])).glob("*.embeddings.npz"))
     if not embed_paths:
         raise RuntimeError(f"no embedding shards found under {embed_dir}")
 
@@ -71,9 +71,9 @@ def main():
     print_device("score_tiles")
     cfg = yaml.safe_load(Path(sys.argv[1]).read_text())
     embed_dir = Path(cfg["prune"]["embeddings_path"])
-    out_path = Path(cfg["prune"]["scores_path"])
+    out_path = Path(cfg["prune"]["scores_path"]) / Path(cfg["prune"]["embedding_model"]) / "tile_scores.parquet"
 
-    paths, embeddings = load_embeddings(embed_dir)
+    paths, embeddings = load_embeddings(embed_dir, cfg)
 
     print("loaded embeddings")
 
