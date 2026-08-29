@@ -32,7 +32,7 @@ prune:
   embedding_model_batchsize: 2048
   embeddings_path: /content/drive/MyDrive/nanopath/tile_embeddings/
   scores_path: /content/drive/MyDrive/nanopath/tile_scores/
-  num_clusters: 128
+  num_clusters: 1024
   sampling_intensity: 0.0  # 0 is uniform sampling, 1 is fully score-weighted
   cut_score: null  # null keeps every tile; otherwise scores above this value are removed
 
