@@ -38,6 +38,7 @@ from probe import (
     probe_enabled,
     queue_probe_job,
 )
+from sampler import OnlineClusterWeighting
 
 
 # Prefix every console line with wall time and job/process id so SLURM logs are easy to scan.
@@ -153,7 +154,7 @@ def sinkhorn(x, temp):
 
 # Cross-entropy between teacher distribution and softmax(student / 0.1).
 def dino_ce(student, teacher):
-    return -(teacher * F.log_softmax(student / 0.1, dim=-1)).sum(-1).mean()
+    return -(teacher * F.log_softmax(student / 0.1, dim=-1)).sum(-1)
 
 
 # KDE uniformity loss on L2-normalised CLS tokens.
@@ -220,6 +221,11 @@ def stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen
     if examples_seen + batch_size > max_train_samples:
         return "max_train_samples"
     return None
+
+
+def make_train_loader(train_ds, weights, sampler_length, loader_kwargs):
+    sampler = WeightedRandomSampler(weights, sampler_length, replacement=True)
+    return DataLoader(train_ds, sampler=sampler, **loader_kwargs)
 
 
 # Orchestrates one pretraining run: setup, train+probe loop, checkpoint, summary.
@@ -370,10 +376,22 @@ def main():
     loader_kwargs = dict(batch_size=batch_size, drop_last=True, num_workers=train_cfg["num_workers"], pin_memory=True,
                          prefetch_factor=train_cfg["prefetch_factor"] if train_cfg["num_workers"] > 0 else None,
                          persistent_workers=train_cfg["persistent_workers"] and train_cfg["num_workers"] > 0)
-    # train loader
-    # if prune.sampling_intensity is 0 score-based sampling is disabled (i.e. WeightedRandomSampler does not always have effect)
-    sampler = WeightedRandomSampler(train_ds.sample_weights, len(train_ds), replacement=True)
-    train_loader = DataLoader(train_ds, sampler=sampler, **loader_kwargs)
+    online_cfg = cfg.get("online_cluster_weighting")
+    online_enabled = online_cfg["enabled"]
+    if online_enabled:
+        update_every_steps = int(online_cfg["update_every_steps"])
+        online_state = OnlineClusterWeighting(
+            train_ds.sample_weights,
+            torch.as_tensor(train_ds.cluster_of, dtype=torch.long),
+            int(cfg["prune"]["num_clusters"]),
+            float(online_cfg["ema_decay"]),
+        )
+        sampler_length = batch_size * update_every_steps
+    else:
+        sampler_length = len(train_ds)
+    # always start with the weights that were baked into the train_ds 
+    # (which may or may not use the offline pruning work depending on sampling_intesity)
+    train_loader = make_train_loader(train_ds, train_ds.sample_weights, sampler_length, loader_kwargs)
     # val loader
     val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
 
@@ -437,12 +455,26 @@ def main():
         sl = student_backbone(lf, checkpoint=ckpt)
         sg_cls, sl_cls = student_dino_head(sg["x_norm_clstoken"]), student_dino_head(sl["x_norm_clstoken"])
         L = train_cfg["local_views"]
-        local_loss = sum(dino_ce(x, y) for x in sl_cls.chunk(L) for y in t_prob) / (2 * L + 2)
-        global_loss = dino_ce(sg_cls, t_prob.flatten(0, 1)) * 2 / (2 * L + 2)
+        # DINO
+        # local loss
+        local_loss_sum = sum(dino_ce(x, y) for x in sl_cls.chunk(L) for y in t_prob)
+        local_per_sample = local_loss_sum / (2 * L + 2)
+        # global loss
+        global_teacher_targets = t_prob.flatten(0, 1)  # [two views, batch size, classes] -> [views times batch size, classes]
+        global_loss_flat = dino_ce(sg_cls, global_teacher_targets)  # [views times batch size]
+        global_loss_by_view = global_loss_flat.reshape(2, b)  # [two views, batch size]
+        global_loss_per_tile = global_loss_by_view.mean(0)  # [batch size]
+        global_per_sample = global_loss_per_tile * 2 / (2 * L + 2)  # [batch size]
+        dino_per_sample = local_per_sample + global_per_sample
+        # average over the batch for backward computation
+        local_loss = local_per_sample.mean()
+        global_loss = global_per_sample.mean()
+
+        # IBOT
         s_patch = student_ibot_head(sg["x_norm_patchtokens"].flatten(0, 1)[mask_idx])
         ibot_loss = -(t_patch_prob * F.log_softmax(s_patch / 0.1, dim=-1)).sum(-1).mul(mask_w).sum() / max(1, b * 2)
         kde = dino_cfg["kde_loss_weight"] * k_scale * sum(kde_loss(x, dino_cfg["kde_concentration"]) for x in sg["x_norm_clstoken"].chunk(train_cfg["global_views"]))
-        return local_loss + global_loss, ibot_loss, kde
+        return local_loss + global_loss, ibot_loss, kde, dino_per_sample.detach()
 
     # Held-out validation pass: same DINO + iBOT + KDE losses on `val_batches` of the val split.
     # Schedule terms (teacher_temp, kde_scale) drift over training, so read val curves as same-step
@@ -463,7 +495,7 @@ def main():
             with torch.no_grad(), autocast:
                 gf, lf = vg.transpose(0, 1).flatten(0, 1), vl.transpose(0, 1).flatten(0, 1)
                 masks, mask_idx, mask_w = make_masks(b * train_cfg["global_views"], global_patches, device)
-                dino_l, ibot_l, kde_v = compute_losses(gf, lf, b, masks, mask_idx, mask_w, eval_teacher_temp, eval_kde_scale)
+                dino_l, ibot_l, kde_v, _ = compute_losses(gf, lf, b, masks, mask_idx, mask_w, eval_teacher_temp, eval_kde_scale)
             sums += torch.tensor([float(dino_l), float(ibot_l), float(kde_v), float(dino_l + ibot_l + kde_v)], device=device)
             n_batches += 1
         random.setstate(py_rng)
@@ -519,7 +551,10 @@ def main():
     measured_flops_per_step = None
 
     while stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples) is None:
-        for batch in train_loader:
+        train_iterator = iter(train_loader)
+        window_steps = sampler_length // batch_size
+        for _ in range(window_steps):
+            batch = next(train_iterator)
             if stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples) is not None:
                 break
             batch_started_at = time.monotonic()
@@ -559,11 +594,13 @@ def main():
                     # so [crop0_img0, crop0_img1, ..., crop1_img0, ...] for clean teacher/student alignment.
                     gf = global_views.transpose(0, 1).flatten(0, 1)
                     lf = local_views.transpose(0, 1).flatten(0, 1)
-                    dino_loss_value, ibot_loss, kde = compute_losses(
+                    dino_loss_value, ibot_loss, kde, sample_losses = compute_losses(
                         gf, lf, batch_size, masks, mask_idx, mask_w, teacher_temp, kde_scale,
                         ckpt=activation_checkpointing,
                     )
                     total_loss = dino_loss_value + ibot_loss + kde
+                if online_enabled:
+                    online_state.accumulate(batch["cluster_idx"], sample_losses)
                 opt.zero_grad(set_to_none=True)
                 total_loss.backward()
                 grad_norm = nn.utils.clip_grad_norm_(
@@ -689,6 +726,15 @@ def main():
             data_wait_started_at = time.monotonic()
             if stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples) is not None:
                 break
+        # if we use online sampling adaption, rebuild sampler at the end of window
+        if online_enabled:
+            online_state.update_weights()
+            # cleanup the old loader
+            if train_loader._iterator is not None:
+                train_loader._iterator._shutdown_workers()
+                train_loader._iterator = None
+            # create fresh loader with using the updated weight
+            train_loader = make_train_loader(train_ds, online_state.weights, sampler_length, loader_kwargs)
     
     ########  TRAINING OVER  ########
 

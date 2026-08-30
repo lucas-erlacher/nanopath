@@ -36,6 +36,11 @@ prune:
   sampling_intensity: 0.0  # 0 is uniform sampling, 1 is fully score-weighted
   cut_score: null  # null keeps every tile; otherwise scores above this value are removed
 
+online_cluster_weighting:
+  enabled: false
+  update_every_steps: 250
+  ema_decay: 0.95
+
 model:
   type: dinov2_vits14_reg
 

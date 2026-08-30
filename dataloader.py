@@ -114,13 +114,15 @@ class TCGATileDataset(Dataset):
         # the JPEG bytes column stays on disk until __getitem__.
         in_split_shard = []
         in_split_row = []
-        split_scores = []  
+        split_scores = []
+        split_clusters = []
 
         scores_path = Path(prune["scores_path"]) / Path(prune["embedding_model"]) /  Path("tile_scores.parquet")
-        score_table = pq.read_table(str(scores_path), columns=["path", "score"])
+        score_table = pq.read_table(str(scores_path), columns=["path", "score", "cluster"])
         # embed_tiles.py keeps paths aligned with embeddings, and score_tiles.py keeps
         # those paths aligned with scores - hence we can create the path to score lookup dict in the following (simple) way
         path_to_score = dict(zip(score_table["path"].to_pylist(), score_table["score"].to_pylist()))
+        path_to_cluster = dict(zip(score_table["path"].to_pylist(), score_table["cluster"].to_pylist()))
 
         for shard_idx, shard_path in enumerate(self.shards):
             paths = pq.read_table(str(shard_path), columns=["path"], memory_map=True)["path"].to_pylist()
@@ -132,11 +134,13 @@ class TCGATileDataset(Dataset):
                     in_split_row.append(row_idx)
                     # precisely load score by path
                     split_scores.append(path_to_score[p])
+                    split_clusters.append(path_to_cluster[p])
         if not in_split_shard:
             raise ValueError(f"no {'train' if is_train else 'val'} tiles found in {dataset_dir}; check val_fraction={data['val_fraction']}")
         # Two parallel int32 arrays (~32 MB total for 4M tiles) shared COW across DataLoader fork-workers.
         self.shard_of = np.asarray(in_split_shard, dtype=np.int32)
         self.row_of = np.asarray(in_split_row, dtype=np.int32)
+        self.cluster_of = np.asarray(split_clusters, dtype=np.int32)
         # finalize score-sampling distribution
         if is_train:
             uniform_distribution = torch.full((len(self),), 1.0 / len(self), dtype=torch.float64)
@@ -220,6 +224,7 @@ class TCGATileDataset(Dataset):
             "global_views": global_views,
             "local_views": local_views,
             "sample_idx": torch.tensor(int(idx), dtype=torch.int64),
+            "cluster_idx": torch.tensor(int(self.cluster_of[idx]), dtype=torch.int64),
             "slide_id": torch.tensor(slide_key, dtype=torch.int64),
             "patient_id": torch.tensor(patient_key, dtype=torch.int64),
         }
