@@ -38,7 +38,7 @@ prune:
 
 online_cluster_weighting:
   enabled: false
-  update_every_steps: 250
+  update_every_steps: 1000
   ema_decay: 0.95
 
 model:
