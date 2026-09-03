@@ -1,4 +1,9 @@
 import torch
+import numpy as np
+import wandb
+
+
+HISTOGRAM_BUCKETS = 50
 
 class OnlineClusterWeighting:
     def __init__(self, weights, cluster_ids, num_clusters, ema_decay):
@@ -14,7 +19,18 @@ class OnlineClusterWeighting:
         self.loss_sum.scatter_add_(0, cluster_ids, losses)  # add new losses into the right cluster-buckets (= a scatter driven by ids) 
         self.loss_count.scatter_add_(0, cluster_ids, torch.ones_like(cluster_ids))  # same operation for counts (scatter is the elegant function here as well)
 
-    def update_weights(self):
+    def _log_cluster_loss_distribution(self, wandb_run, step, average_cluster_losses):
+        normalized_losses = average_cluster_losses / average_cluster_losses.sum()
+        wandb_run.log({"sampler/cluster_loss_distribution": wandb.Histogram(
+            np_histogram=np.histogram(normalized_losses.numpy(), bins=HISTOGRAM_BUCKETS)
+        )}, step=step)
+
+    def _log_cluster_observation_count(self, wandb_run, step):
+        wandb_run.log({"sampler/cluster_observation_count": wandb.Histogram(
+            np_histogram=np.histogram(self.loss_count.numpy(), bins=HISTOGRAM_BUCKETS)
+        )}, step=step)
+
+    def update_weights(self, step, wandb_run):
         average_cluster_losses = torch.zeros_like(self.loss_sum)  # create slots for every cluster
         
         observed = self.loss_count > 0  # only update clusters that received updates during accumulation - others would divide by zero
@@ -24,6 +40,9 @@ class OnlineClusterWeighting:
         distribution = per_tile  / per_tile.sum()  # normalize to probability distribution s.t. interpolation is between comparable scales
         
         self.weights.lerp_(distribution, 1 - self.ema_decay)  # EMA style interpolation
+
+        self._log_cluster_loss_distribution(wandb_run, step, average_cluster_losses)
+        self._log_cluster_observation_count(wandb_run, step)
         
         # reset accumulation state 
         self.loss_sum.zero_()

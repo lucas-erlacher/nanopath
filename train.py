@@ -380,10 +380,11 @@ def main():
     online_enabled = online_cfg["enabled"]
     if online_enabled:
         update_every_steps = int(online_cfg["update_every_steps"])
+        num_clusters = int(cfg["prune"]["num_clusters"])
         online_state = OnlineClusterWeighting(
             train_ds.sample_weights,
             torch.as_tensor(train_ds.cluster_of, dtype=torch.long),
-            int(cfg["prune"]["num_clusters"]),
+            num_clusters,
             float(online_cfg["ema_decay"]),
         )
         sampler_length = batch_size * update_every_steps
@@ -728,7 +729,7 @@ def main():
                 break
         # if we use online sampling adaption, rebuild sampler at the end of window
         if online_enabled:
-            online_state.update_weights()
+            online_state.update_weights(step, wandb_run)
             # cleanup the old loader
             if train_loader._iterator is not None:
                 train_loader._iterator._shutdown_workers()
