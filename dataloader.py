@@ -221,6 +221,7 @@ class TCGATileDataset(Dataset):
         global_views = torch.stack([self.global_aug(tile) for _ in range(self.global_views)])
         local_views = torch.stack([self.local_aug(tile) for _ in range(self.local_views)])
         return {
+            "tile": tile,
             "global_views": global_views,
             "local_views": local_views,
             "sample_idx": torch.tensor(int(idx), dtype=torch.int64),

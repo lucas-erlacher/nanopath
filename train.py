@@ -601,7 +601,7 @@ def main():
                     )
                     total_loss = dino_loss_value + ibot_loss + kde
                 if online_enabled:
-                    online_state.accumulate(batch["cluster_idx"], sample_losses)
+                    online_state.accumulate(batch["cluster_idx"], sample_losses, batch["tile"])
                 opt.zero_grad(set_to_none=True)
                 total_loss.backward()
                 grad_norm = nn.utils.clip_grad_norm_(
