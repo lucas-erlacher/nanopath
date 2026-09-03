@@ -30,6 +30,10 @@ class OnlineClusterWeighting:
             np_histogram=np.histogram(self.loss_count.numpy(), bins=HISTOGRAM_BUCKETS)
         )}, step=step)
 
+    def _log_effective_sample_size(self, wandb_run, step):
+        effective_sample_size = self.weights.sum().square() / self.weights.square().sum()
+        wandb_run.log({"sampler/effective_sample_size": effective_sample_size.item()}, step=step)
+
     def update_weights(self, step, wandb_run):
         average_cluster_losses = torch.zeros_like(self.loss_sum)  # create slots for every cluster
         
@@ -43,6 +47,7 @@ class OnlineClusterWeighting:
 
         self._log_cluster_loss_distribution(wandb_run, step, average_cluster_losses)
         self._log_cluster_observation_count(wandb_run, step)
+        self._log_effective_sample_size(wandb_run, step)
         
         # reset accumulation state 
         self.loss_sum.zero_()
