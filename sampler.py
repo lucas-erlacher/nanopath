@@ -5,7 +5,7 @@ import wandb
 
 
 HISTOGRAM_BUCKETS = 50
-IMAGE_GRID_TOP_K = 4
+IMAGE_GRID_TOP_K = 8
 IMAGE_GRID_EVERY_UPDATES = 1
 
 class OnlineClusterWeighting:
