@@ -377,9 +377,9 @@ def main():
                          prefetch_factor=train_cfg["prefetch_factor"] if train_cfg["num_workers"] > 0 else None,
                          persistent_workers=train_cfg["persistent_workers"] and train_cfg["num_workers"] > 0)
     online_cfg = cfg.get("online_cluster_weighting")
-    online_enabled = online_cfg["enabled"]
+    update_every_steps = online_cfg["update_every_steps"]
+    online_enabled = update_every_steps is not None
     if online_enabled:
-        update_every_steps = int(online_cfg["update_every_steps"])
         num_clusters = int(cfg["prune"]["num_clusters"])
         online_state = OnlineClusterWeighting(
             train_ds.sample_weights,
