@@ -26,6 +26,7 @@ data:
   tissue_thresh: 0.5 # training rejects tiles unless this fraction of pixels has RGB saturation > 0.07
 
 prune:
+  enabled: false
   embedding_model: kaiko_vits16  # [dinov2_vits14_reg, kaiko_vits16]
   embedding_mean: [0.5, 0.5, 0.5]
   embedding_std: [0.5, 0.5, 0.5]
@@ -37,6 +38,7 @@ prune:
   cut_score: null  # null keeps every tile; otherwise scores above this value are removed
 
 online_cluster_weighting:
+  enabled: false
   update_every_steps: 1000
   ema_decay: 0.95
 

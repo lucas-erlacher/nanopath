@@ -94,6 +94,8 @@ class TCGATileDataset(Dataset):
         data = cfg["data"]
         train = cfg["train"]
         prune = cfg["prune"]
+        prune_enabled = bool(prune["enabled"])
+        online_enabled = bool(cfg["online_cluster_weighting"]["enabled"])
         sampling_intensity = float(prune["sampling_intensity"])
 
         self.tissue_thresh = float(data["tissue_thresh"]) if is_train else 0.0
@@ -115,12 +117,11 @@ class TCGATileDataset(Dataset):
         split_scores = []
         split_clusters = []
 
-        scores_path = Path(prune["scores_path"]) / Path(prune["embedding_model"]) /  Path("tile_scores.parquet")
-        score_table = pq.read_table(str(scores_path), columns=["path", "score", "cluster"])
-        # embed_tiles.py keeps paths aligned with embeddings, and score_tiles.py keeps
-        # those paths aligned with scores - hence we can create the path to score lookup dict in the following (simple) way
-        path_to_score = dict(zip(score_table["path"].to_pylist(), score_table["score"].to_pylist()))
-        path_to_cluster = dict(zip(score_table["path"].to_pylist(), score_table["cluster"].to_pylist()))
+        if prune_enabled or online_enabled:
+            scores_path = Path(prune["scores_path"]) / Path(prune["embedding_model"]) / Path("tile_scores.parquet")
+            score_table = pq.read_table(str(scores_path), columns=["path", "score", "cluster"])
+            path_to_score = dict(zip(score_table["path"].to_pylist(), score_table["score"].to_pylist()))
+            path_to_cluster = dict(zip(score_table["path"].to_pylist(), score_table["cluster"].to_pylist()))
 
         for shard_idx, shard_path in enumerate(self.shards):
             paths = pq.read_table(str(shard_path), columns=["path"], memory_map=True)["path"].to_pylist()
@@ -130,26 +131,26 @@ class TCGATileDataset(Dataset):
                 if patient_in_val(patient_id_from_relpath(p), data["split_seed"], data["val_fraction"]) != is_train:
                     in_split_shard.append(shard_idx)
                     in_split_row.append(row_idx)
-                    # precisely load score by path
-                    split_scores.append(path_to_score[p])
-                    split_clusters.append(path_to_cluster[p])
+                    split_scores.append(path_to_score[p] if prune_enabled else 0.0)
+                    split_clusters.append(path_to_cluster[p] if online_enabled else 0)
         if not in_split_shard:
             raise ValueError(f"no {'train' if is_train else 'val'} tiles found in {dataset_dir}; check val_fraction={data['val_fraction']}")
         # Two parallel int32 arrays (~32 MB total for 4M tiles) shared COW across DataLoader fork-workers.
         self.shard_of = np.asarray(in_split_shard, dtype=np.int32)
         self.row_of = np.asarray(in_split_row, dtype=np.int32)
         self.cluster_of = np.asarray(split_clusters, dtype=np.int32)
-        # finalize score-sampling distribution
+        # Finalize score-sampling distribution only when explicitly enabled.
         if is_train:
             uniform_distribution = torch.full((len(self),), 1.0 / len(self), dtype=torch.float64)
-            scores = torch.tensor(split_scores, dtype=torch.float64)
-            cut_score = prune["cut_score"]
-            removal_mask = torch.zeros_like(scores, dtype=torch.bool) if cut_score is None else scores > float(cut_score)
-            scores[removal_mask] = 0  # already set to zero s.t. the sum is not perturbed by tiles that will not be part of training
-            score_distribution = scores / scores.sum()  # turn raw scores into probability distribution
-            # linearly interpolate between score-distribution and uniform-distribution
-            self.sample_weights = torch.lerp(uniform_distribution, score_distribution, sampling_intensity)
-            self.sample_weights[removal_mask] = 0  # set to zero s.t. these tiles are not part of training
+            self.sample_weights = uniform_distribution
+            if prune_enabled:
+                scores = torch.tensor(split_scores, dtype=torch.float64)
+                cut_score = prune["cut_score"]
+                removal_mask = torch.zeros_like(scores, dtype=torch.bool) if cut_score is None else scores > float(cut_score)
+                scores[removal_mask] = 0
+                score_distribution = scores / scores.sum()
+                self.sample_weights = torch.lerp(uniform_distribution, score_distribution, sampling_intensity)
+                self.sample_weights[removal_mask] = 0
         mean, std = data["mean"], data["std"]
         self.global_views = int(train["global_views"])
         self.local_views = int(train["local_views"])
