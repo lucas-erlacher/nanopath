@@ -1,45 +1,60 @@
-# PathoROB
+# PathoROB robustness protocol
 
-## Role In Nanopath
+PathoROB is an auxiliary check that a representation is insensitive to center
+while still separating biological classes. It contributes 10% of the final
+score; the five task families contribute the other 90%.
 
-`pathorob` is a robustness probe. It contributes the mean of the camelyon and tolkach_esca robustness indices to the README robustness column.
+## Data and fixed adapter
 
-## Source
+| Subset | Used patches | Slides | Biological classes | Centers | Fixed k |
+|---|---:|---:|---:|---:|---:|
+| Camelyon | 22,402 | 97 | normal 11,205; tumor 11,197 | CWZ, LPON, RST, RUMC, UMCU | 11 |
+| Tolkach ESCA | 13,800 | 62 | 6 classes, 2,300 each | UKK, WNS, CHA | 46 |
 
-- [bifold-pathomics/PathoROB-camelyon](https://huggingface.co/datasets/bifold-pathomics/PathoROB-camelyon)
-- [bifold-pathomics/PathoROB-tolkach_esca](https://huggingface.co/datasets/bifold-pathomics/PathoROB-tolkach_esca)
-- Paper/preprint: [Towards Robust Foundation Models for Digital Pathology](https://arxiv.org/abs/2507.17845)
+Tolkach's 2,500 TCGA-center records are excluded from both the manifest-selected
+data and the downloadable snapshot. Camelyon is used as published.
 
-Both are downloaded from Hugging Face by `prepare.py`.
+The upstream sources are
+[`PathoROB-camelyon`](https://huggingface.co/datasets/bifold-pathomics/PathoROB-camelyon),
+[`PathoROB-tolkach_esca`](https://huggingface.co/datasets/bifold-pathomics/PathoROB-tolkach_esca),
+and the [PathoROB paper](https://arxiv.org/abs/2507.17845). The nanopath mirror
+retains the upstream labels and selected images under their original terms.
 
-## Data Used
+PathoROB intentionally does not call a model's configurable
+`probe_features()`. Its fixed adapter concatenates the final normalized CLS
+token and the mean normalized patch token, then L2-normalizes the result. This
+keeps the robustness test comparable even when a nanopath recipe changes
+test-time layer or view aggregation for task probes.
 
-PathoROB measures whether an embedding neighborhood is dominated more by biological class than by non-biological medical-center signatures. Nanopath uses two public PathoROB subsets:
+## Different-slide neighbors
 
-| subset | tissue / organ | biological classes | centers used | patches used |
-|---|---|---:|---:|---:|
-| camelyon | breast lymph node metastasis | 2 | 5 | 22402 |
-| tolkach_esca | esophageal cancer | 6 | 3 | 13800 |
+Cosine neighbors from the same slide are not eligible. For each query, the
+search first expands by the maximum possible number of same-slide candidates,
+then retains the first fixed-`k` neighbors from other slides. There is no tuned
+`k` and no learned head.
 
-The downloaded Tolkach ESCA parquet has 16,300 patches across four centers, but `probe.py` excludes `VALSET3_TCGA` before scoring, leaving 13,800 used patches. PathoROB is not a supervised train/validation fit in Nanopath, so the train and val columns are not applicable.
+Let:
 
-## Implementation
+- `SO` be neighbor pairs with the same biological class and a different center;
+- `OS` be pairs with a different biological class and the same center.
 
-`probe.py` embeds every patch in each subset using a no-crop square resize and the frozen backbone. For each patch it concatenates the normalized CLS token with the mean normalized patch-token vector, normalizes the resulting feature, drops same-slide neighbors, and computes the PathoROB-style site-vs-biology neighbor index with fixed `k` values:
+The published-style robustness index is:
 
-- camelyon: `k = 11`
-- tolkach_esca: `k = 46`
+```text
+robustness_index = SO / (SO + OS)
+```
 
-The implementation counts same-biology/different-center neighbors (`SO`) and different-biology/same-center neighbors (`OS`) among the retained nearest neighbors, then reports `SO / (SO + OS)`. The dataset score is the mean of the two subset indices, so higher means biological structure dominates center structure more strongly.
+A representation can raise this quantity by erasing center signal without
+becoming biologically useful, so the benchmark also predicts the query's
+biological class by majority vote among the same fixed neighbors and reports
+class-balanced accuracy.
 
-## Null Distribution Audit
+```text
+subset_quality = (robustness_index + biological_balanced_accuracy) / 2
+robustness_quality_mean = mean(Camelyon quality, Tolkach ESCA quality)
+```
 
-![PathoROB null distributions](null_plots/pathorob_null_distributions.png)
-
-The orange null uses randomized-weight DINOv2-small evaluations through the same probe path: mean 0.194, std 0.003, max 0.199.
-
-This is the strongest null check in the suite. Randomized DINOv2-small is tightly clustered near 0.19, while every pretrained reference is far above it, so PathoROB is clearly measuring backbone structure rather than probe-head randomness.
-
-## Difference From Original Usage
-
-The original PathoROB benchmark includes multiple robustness settings and more datasets. Nanopath uses the camelyon and non-TCGA tolkach_esca public subsets, does no supervised head training, and treats the resulting robustness index as one validation-style probe scalar. It should be interpreted differently from the classification probes: this score rewards center-invariant biological neighborhoods, not task accuracy on labeled train/validation splits.
+Raw `SO`, `OS`, robustness index, and biological balanced accuracy remain in
+the result for diagnosis. Only `robustness_quality_mean` enters the final
+scalar, at 10%. This prevents a center-invariant but biologically collapsed
+representation from dominating genuine task improvements.

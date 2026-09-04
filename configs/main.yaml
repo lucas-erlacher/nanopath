@@ -85,14 +85,22 @@ probe:
   model_weights: ema
   count: 1 # probe n times during training (1 = only at the end)
   datasets:
+    - bach
     - bracs
     - break_his
+    - crc
+    - esca
     - mhist
     - pcam
+    - spider_breast
+    - spider_colorectal
+    - spider_skin
+    - spider_thorax
+    - wilds
   segmentation_datasets:
     - pannuke
-    - monusac
-    - consep
+    - segpath_epithelial
+    - segpath_lymphocytes
   slide_datasets:
     - ucla_lung
   auc_datasets:
@@ -103,15 +111,23 @@ probe:
   robustness_datasets:
     - pathorob
   dataset_roots:
+    bach: /content/drive/MyDrive/nanopath/probes/bach
     bracs: /content/drive/MyDrive/nanopath/probes/bracs
     break_his: /content/drive/MyDrive/nanopath/probes/break_his
-    consep: /content/drive/MyDrive/nanopath/probes/consep
+    crc: /content/drive/MyDrive/nanopath/probes/crc
     cptac_pda_os: /content/drive/MyDrive/nanopath/probes/cptac_pda_os
+    esca: /content/drive/MyDrive/nanopath/probes/esca
     leopard_bcr: /content/drive/MyDrive/nanopath/probes/leopard_bcr
     mhist: /content/drive/MyDrive/nanopath/probes/mhist
-    monusac: /content/drive/MyDrive/nanopath/probes/monusac
     pcam: /content/drive/MyDrive/nanopath/probes/pcam
     pannuke: /content/drive/MyDrive/nanopath/probes/pannuke
     pathorob: /content/drive/MyDrive/nanopath/probes/pathorob
+    segpath_epithelial: /content/drive/MyDrive/nanopath/probes/segpath_epithelial
+    segpath_lymphocytes: /content/drive/MyDrive/nanopath/probes/segpath_lymphocytes
+    spider_breast: /content/drive/MyDrive/nanopath/probes/spider_breast
+    spider_colorectal: /content/drive/MyDrive/nanopath/probes/spider_colorectal
+    spider_skin: /content/drive/MyDrive/nanopath/probes/spider_skin
+    spider_thorax: /content/drive/MyDrive/nanopath/probes/spider_thorax
     surgen: /content/drive/MyDrive/nanopath/probes/surgen
     ucla_lung: /content/drive/MyDrive/nanopath/probes/ucla_lung
+    wilds: /content/drive/MyDrive/nanopath/probes/wilds

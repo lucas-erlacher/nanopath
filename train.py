@@ -1,9 +1,9 @@
-# Continual DINOv2 pretraining on TCGA tiles (single-GPU). Three loss terms:
+# DINO/iBOT pretraining on TCGA tiles (single-GPU), currently initialized from DINOv2. Three loss terms:
 # DINO CLS self-distillation (Sinkhorn-Knopp centred teacher targets),
 # iBOT masked-patch self-distillation, and a KDE uniformity term on the
 # L2-normalised CLS tokens. YAML drives the tunable knobs (backbone variant,
 # LR + LR scheduler, drop path, layerwise decay, KDE weight + concentration,
-# FLOP/sample budgets, batch size); other DINOv2 hyperparameters are hardcoded
+# FLOP/sample budgets, batch size); other objective hyperparameters are hardcoded
 # inline at their use sites.
 
 import atexit
@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.flop_counter import FlopCounterMode
 
 from dataloader import TCGATileDataset, TILE_SIZE
-from model import DINOHead, DinoV2ViT, load_dinov2_pretrained
+from model import DINOHead, ViT, load_pretrained
 from probe import (
     completed_probe_summary,
     collect_probe_results,
@@ -49,16 +49,18 @@ def console_prefix(): return f"{time.strftime('%H:%M:%S')} {os.environ.get('SLUR
 # expandvars is necessary to resolve `$USER` for checked-in configs.
 def load_config():
     if len(sys.argv) < 2:
-        raise ValueError("usage: python train.py <config.yaml> [output_dir=<path>]")
+        raise ValueError("usage: python train.py <config.yaml> [output_dir=<path>] [seed=<int>]")
     cfg = yaml.safe_load(os.path.expandvars(Path(sys.argv[1]).read_text()))
     cfg["config_path"] = str(Path(sys.argv[1]).resolve())
-    # Optional `key=value` overrides after the config; only output_dir is supported,
-    # since it's the run identifier and routinely set per-submission from the CLI.
+    # Run identity and confirmation seed are the only CLI overrides; recipes stay in YAML.
     for arg in sys.argv[2:]:
         key, _, value = arg.partition("=")
-        if key != "output_dir":
-            raise ValueError(f"unsupported override {arg!r}; only output_dir=<path> is supported")
-        cfg["project"]["output_dir"] = os.path.expandvars(value)
+        if key == "output_dir":
+            cfg["project"]["output_dir"] = os.path.expandvars(value)
+        elif key == "seed":
+            cfg["train"]["seed"] = int(value)
+        else:
+            raise ValueError(f"unsupported override {arg!r}; use output_dir=<path> or seed=<int>")
     dataset_dir = Path(cfg["data"]["dataset_dir"])
     if not any(dataset_dir.glob("shard-*.parquet")):
         raise FileNotFoundError(
@@ -92,16 +94,17 @@ def maybe_arm_labless_autosubmit(cfg, repo_dir):
         if not os.environ.get("SLURM_JOB_ID"):
             print(f"{console_prefix()} Labless  no interactive stdin; training will run without auto-submit.", flush=True)
         return ""
-    print("This looks like a full Labless-eligible run. Leave either prompt blank to train without auto-submit.", flush=True)
+    print("This looks like a full Labless-eligible run. Leave the run name blank to train without auto-submit.", flush=True)
     run_name = input("Labless run name (<=20 chars): ").strip()
-    notes = input("Labless notes: ").strip()
-    if not run_name or not notes or len(run_name) > 20:
-        print("Labless auto-submit skipped; run name and notes are required, and run name must be <=20 chars.", flush=True)
+    notes = input("Labless experiment note (unique change + why): ").strip()
+    if not run_name or len(run_name) > 20:
+        print("Labless auto-submit skipped; run name is required and must be <=20 chars.", flush=True)
         return ""
     token_path = str(Path(str(Path(cfg["project"]["output_dir"]).expanduser().resolve()) + ".labless_autosubmit.json"))
     status = subprocess.run(
         [sys.executable, str(repo_dir / "labless" / "submit_to_labless.py"), "login_only=true", f"token_output={token_path}", f"run_name={run_name}", f"notes={notes}"],
         cwd=repo_dir,
+        check=False,
     ).returncode
     if status != 0:
         print("Labless login did not complete; training will run without auto-submit.", flush=True)
@@ -127,6 +130,7 @@ def finish_labless_autosubmit(token_path, output_dir, repo_dir):
             f"github_token_file={token_file}",
         ],
         cwd=repo_dir,
+        check=False,
     ).returncode
     token_file.unlink(missing_ok=True)
     if status == 2:
@@ -246,7 +250,7 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     variant = cfg["model"]["type"]
-    student_backbone = load_dinov2_pretrained(DinoV2ViT(variant=variant, drop_path_rate=dino_cfg["drop_path_rate"])).to(device)
+    student_backbone = load_pretrained(ViT(variant=variant, drop_path_rate=dino_cfg["drop_path_rate"])).to(device)
     teacher_backbone = deepcopy(student_backbone)
     teacher_backbone.train(False)
     for p in teacher_backbone.parameters():
@@ -319,6 +323,7 @@ def main():
     print(
         f"{console_prefix()} Run  start: {wandb_name}  "
         f"config: {cfg['config_path']}  batch_size: {batch_size}  max_train_samples: {max_train_samples}  "
+        f"seed: {train_cfg['seed']}  "
         f"max_train_flops: {train_cfg['max_train_flops']}  "
         f"probe_count: {cfg['probe']['count']}  warmup_fraction: {dino_cfg['warmup_fraction']}  "
         f"lr: {dino_cfg['lr']}  adam_beta2: {dino_cfg['adam_beta2']}  kde_loss_weight: {dino_cfg['kde_loss_weight']}  "
@@ -373,9 +378,14 @@ def main():
 
     # Train shuffles + drops partials; the loop never starts a batch that would exceed
     # max_train_samples, so every optimizer step keeps the configured batch size.
-    loader_kwargs = dict(batch_size=batch_size, drop_last=True, num_workers=train_cfg["num_workers"], pin_memory=True,
-                         prefetch_factor=train_cfg["prefetch_factor"] if train_cfg["num_workers"] > 0 else None,
-                         persistent_workers=train_cfg["persistent_workers"] and train_cfg["num_workers"] > 0)
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "drop_last": True,
+        "num_workers": train_cfg["num_workers"],
+        "pin_memory": True,
+        "prefetch_factor": train_cfg["prefetch_factor"] if train_cfg["num_workers"] > 0 else None,
+        "persistent_workers": train_cfg["persistent_workers"] and train_cfg["num_workers"] > 0,
+    }
     online_cfg = cfg.get("online_cluster_weighting")
     update_every_steps = online_cfg["update_every_steps"]
     online_enabled = update_every_steps is not None
@@ -393,7 +403,6 @@ def main():
     # always start with the weights that were baked into the train_ds 
     # (which may or may not use the offline pruning work depending on sampling_intesity)
     train_loader = make_train_loader(train_ds, train_ds.sample_weights, sampler_length, loader_kwargs)
-    # val loader
     val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
 
     activation_checkpointing = bool(train_cfg["activation_checkpointing"])
@@ -433,8 +442,8 @@ def main():
 
     # Count unique tiles/slides/patients for data-coverage diagnostics.
     def flush_unique_counts():
-        for key in seen_ids:
-            seen_ids[key].update(pending_ids[key])
+        for key, seen in seen_ids.items():
+            seen.update(pending_ids[key])
             pending_ids[key].clear()
         unique_tiles_seen = len(seen_ids["sample"])
         return {
@@ -449,12 +458,12 @@ def main():
     def compute_losses(gf, lf, b, masks, mask_idx, mask_w, t_temp, k_scale, ckpt=False):
         with torch.no_grad():
             t = teacher_backbone(gf)
-            t_cls = teacher_dino_head(t["x_norm_clstoken"]).chunk(train_cfg["global_views"])
+            t_cls = teacher_dino_head(t["cls"]).chunk(train_cfg["global_views"])
             t_prob = sinkhorn(torch.cat((t_cls[1], t_cls[0])), t_temp).view(2, b, -1)
-            t_patch_prob = sinkhorn(teacher_ibot_head(t["x_norm_patchtokens"].flatten(0, 1)[mask_idx]), t_temp)
+            t_patch_prob = sinkhorn(teacher_ibot_head(t["patches"].flatten(0, 1)[mask_idx]), t_temp)
         sg = student_backbone(gf, masks=masks, checkpoint=ckpt)
         sl = student_backbone(lf, checkpoint=ckpt)
-        sg_cls, sl_cls = student_dino_head(sg["x_norm_clstoken"]), student_dino_head(sl["x_norm_clstoken"])
+        sg_cls, sl_cls = student_dino_head(sg["cls"]), student_dino_head(sl["cls"])
         L = train_cfg["local_views"]
         # DINO
         # local loss
@@ -472,9 +481,9 @@ def main():
         global_loss = global_per_sample.mean()
 
         # IBOT
-        s_patch = student_ibot_head(sg["x_norm_patchtokens"].flatten(0, 1)[mask_idx])
+        s_patch = student_ibot_head(sg["patches"].flatten(0, 1)[mask_idx])
         ibot_loss = -(t_patch_prob * F.log_softmax(s_patch / 0.1, dim=-1)).sum(-1).mul(mask_w).sum() / max(1, b * 2)
-        kde = dino_cfg["kde_loss_weight"] * k_scale * sum(kde_loss(x, dino_cfg["kde_concentration"]) for x in sg["x_norm_clstoken"].chunk(train_cfg["global_views"]))
+        kde = dino_cfg["kde_loss_weight"] * k_scale * sum(kde_loss(x, dino_cfg["kde_concentration"]) for x in sg["cls"].chunk(train_cfg["global_views"]))
         return local_loss + global_loss, ibot_loss, kde, dino_per_sample.detach()
 
     # Held-out validation pass: same DINO + iBOT + KDE losses on `val_batches` of the val split.
@@ -744,10 +753,9 @@ def main():
     final_unique_counts = flush_unique_counts()
     if step > 0:
         # Final probes have their own readers; close pretraining workers before they compete for CPU/IO.
-        if train_cfg["num_workers"] > 0:
-            if train_loader._iterator is not None:
-                train_loader._iterator._shutdown_workers()
-                train_loader._iterator = None
+        if train_cfg["num_workers"] > 0 and train_loader._iterator is not None:
+            train_loader._iterator._shutdown_workers()
+            train_loader._iterator = None
         # Probes get their own short-lived checkpoint; retain the full checkpoint for resume/submission.
         if step != last_saved_step:
             save_latest_checkpoint(step)
@@ -759,6 +767,8 @@ def main():
         "family": cfg["project"]["family"],
         "recipe_id": cfg["project"]["recipe_id"],
         "config_path": cfg["config_path"],
+        "train_seed": int(train_cfg["seed"]),
+        "data_split_seed": int(cfg["data"]["split_seed"]),
         "wandb": wandb_meta,
         "slurm_job_id": slurm_job_id,
         "backbone_activated_params": backbone_activated_params,
@@ -790,17 +800,17 @@ def main():
         "probe_target_fractions": [None if max_train_samples == 0 else target / max_train_samples for target in probe_targets],
         **({} if probe_state is None else completed_probe_summary(output_dir)),
     }
-    if probe_state is not None and "final_probe_score" not in summary:
-        raise ValueError("probe.enabled is true but final_probe_score is missing; check probe.count, probe failures, and final checkpoint scheduling")
+    if probe_state is not None and "final_score" not in summary:
+        raise ValueError("probe.enabled is true but final_score is missing; check probe.count, probe failures, and final checkpoint scheduling")
     summary_path.write_text(json.dumps(summary, indent=2) + "\n")
     print(
         f"{console_prefix()} Summary  "
         f"steps: {step}  train_wall: {train_loop_wall_seconds:.2f}s  "
-        f"final_probe_score: {summary.get('final_probe_score')}",
+        f"final_score: {summary.get('final_score')}",
         flush=True,
     )
-    for key in summary.keys():
-        wandb_run.summary[key] = summary[key]
+    for key, value in summary.items():
+        wandb_run.summary[key] = value
     wandb_run.finish()
     finish_labless_autosubmit(labless_autosubmit_file, output_dir, repo_dir)
 
