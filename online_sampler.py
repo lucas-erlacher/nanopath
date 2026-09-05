@@ -8,18 +8,23 @@ HISTOGRAM_BUCKETS = 50
 IMAGE_GRID_TOP_K = 8
 IMAGE_GRID_EVERY_UPDATES = 1
 
-class OnlineClusterWeighting:
-    def __init__(self, weights, cluster_ids, num_clusters, ema_decay):
+
+class OnlineSampler:
+    """Update tile weights after each configured sampling window."""
+
+    def __init__(self, weights, cluster_ids, num_clusters, ema_decay, window_samples):
         self.weights = weights.clone()
         self.cluster_ids = cluster_ids
         self.ema_decay = ema_decay
+        self.window_samples = window_samples
         # accumulation state (reset after each update)
         self.loss_sum = torch.zeros(num_clusters, dtype=torch.float64)  # per cluster sum of accumulated losses
         self.loss_count = torch.zeros(num_clusters, dtype=torch.long)  # per cluster number of accumulated losses
         self.image_by_cluster = {}
         self.update_count = 0
 
-    def accumulate(self, cluster_ids, losses, images):
+    def observe(self, batch, losses):
+        cluster_ids, images = batch["cluster_idx"], batch["tile"]
         losses = losses.detach().to(device=self.loss_sum.device, dtype=self.loss_sum.dtype)
         self.loss_sum.scatter_add_(0, cluster_ids, losses)  # add new losses into the right cluster-buckets (= a scatter driven by ids) 
         self.loss_count.scatter_add_(0, cluster_ids, torch.ones_like(cluster_ids))  # same operation for counts (scatter is the elegant function here as well)
@@ -61,7 +66,7 @@ class OnlineClusterWeighting:
         labels += [f"easy {int(cluster_id)}: {average_cluster_losses[cluster_id]:.3f}" for cluster_id in easy_clusters]
         wandb_run.log({"sampler/cluster_image_grid": wandb.Image(grid, caption=" | ".join(labels))}, step=step)
 
-    def update_weights(self, step, wandb_run):
+    def update(self, step, wandb_run):
         self.update_count += 1
 
         average_cluster_losses = torch.zeros_like(self.loss_sum)  # create slots for every cluster

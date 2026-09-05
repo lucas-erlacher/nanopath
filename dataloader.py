@@ -31,6 +31,9 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import v2
 
+from offline_sampler import OfflineSampler
+from sampling_metadata import load_sampling_metadata
+
 
 HED_FROM_RGB = torch.tensor(
     [
@@ -94,9 +97,7 @@ class TCGATileDataset(Dataset):
         data = cfg["data"]
         train = cfg["train"]
         prune = cfg["prune"]
-        prune_enabled = bool(prune["enabled"])
-        online_enabled = bool(cfg["online_cluster_weighting"]["enabled"])
-        sampling_intensity = float(prune["sampling_intensity"])
+        online_cfg = cfg["online_cluster_weighting"]
 
         self.tissue_thresh = float(data["tissue_thresh"]) if is_train else 0.0
         dataset_dir = Path(data["dataset_dir"])
@@ -114,14 +115,7 @@ class TCGATileDataset(Dataset):
         # the JPEG bytes column stays on disk until __getitem__.
         in_split_shard = []
         in_split_row = []
-        split_scores = []
-        split_clusters = []
-
-        if prune_enabled or online_enabled:
-            scores_path = Path(prune["scores_path"]) / Path(prune["embedding_model"]) / Path("tile_scores.parquet")
-            score_table = pq.read_table(str(scores_path), columns=["path", "score", "cluster"])
-            path_to_score = dict(zip(score_table["path"].to_pylist(), score_table["score"].to_pylist()))
-            path_to_cluster = dict(zip(score_table["path"].to_pylist(), score_table["cluster"].to_pylist()))
+        split_paths = []
 
         for shard_idx, shard_path in enumerate(self.shards):
             paths = pq.read_table(str(shard_path), columns=["path"], memory_map=True)["path"].to_pylist()
@@ -131,26 +125,20 @@ class TCGATileDataset(Dataset):
                 if patient_in_val(patient_id_from_relpath(p), data["split_seed"], data["val_fraction"]) != is_train:
                     in_split_shard.append(shard_idx)
                     in_split_row.append(row_idx)
-                    split_scores.append(path_to_score[p] if prune_enabled else 0.0)
-                    split_clusters.append(path_to_cluster[p] if online_enabled else 0)
+                    split_paths.append(p)
         if not in_split_shard:
             raise ValueError(f"no {'train' if is_train else 'val'} tiles found in {dataset_dir}; check val_fraction={data['val_fraction']}")
         # Two parallel int32 arrays (~32 MB total for 4M tiles) shared COW across DataLoader fork-workers.
         self.shard_of = np.asarray(in_split_shard, dtype=np.int32)
         self.row_of = np.asarray(in_split_row, dtype=np.int32)
-        self.cluster_of = np.asarray(split_clusters, dtype=np.int32)
-        # Finalize score-sampling distribution only when explicitly enabled.
-        if is_train:
-            uniform_distribution = torch.full((len(self),), 1.0 / len(self), dtype=torch.float64)
-            self.sample_weights = uniform_distribution
-            if prune_enabled:
-                scores = torch.tensor(split_scores, dtype=torch.float64)
-                cut_score = prune["cut_score"]
-                removal_mask = torch.zeros_like(scores, dtype=torch.bool) if cut_score is None else scores > float(cut_score)
-                scores[removal_mask] = 0
-                score_distribution = scores / scores.sum()
-                self.sample_weights = torch.lerp(uniform_distribution, score_distribution, sampling_intensity)
-                self.sample_weights[removal_mask] = 0
+        self.sampling_metadata = load_sampling_metadata(
+            prune,
+            split_paths,
+            bool(prune["enabled"]),
+            bool(online_cfg["enabled"]),
+            is_train,
+        )
+        self.offline_sampler = OfflineSampler(prune, self.sampling_metadata.scores, len(split_paths), is_train)
         mean, std = data["mean"], data["std"]
         self.global_views = int(train["global_views"])
         self.local_views = int(train["local_views"])
@@ -211,7 +199,7 @@ class TCGATileDataset(Dataset):
             "global_views": global_views,
             "local_views": local_views,
             "sample_idx": torch.tensor(int(idx), dtype=torch.int64),
-            "cluster_idx": torch.tensor(int(self.cluster_of[idx]), dtype=torch.int64),
+            "cluster_idx": torch.tensor(int(self.sampling_metadata.cluster_ids[idx]), dtype=torch.int64),
             "slide_id": torch.tensor(slide_key, dtype=torch.int64),
             "patient_id": torch.tensor(patient_key, dtype=torch.int64),
         }

@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 import yaml
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from torch.utils.flop_counter import FlopCounterMode
 
 from dataloader import TCGATileDataset, TILE_SIZE
@@ -38,7 +38,7 @@ from probe import (
     probe_enabled,
     queue_probe_job,
 )
-from sampler import OnlineClusterWeighting
+from train_utils import setup_sampler, shutdown_loader_workers, update_sampler_after_window
 
 
 # Prefix every console line with wall time and job/process id so SLURM logs are easy to scan.
@@ -227,11 +227,6 @@ def stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen
     return None
 
 
-def make_train_loader(train_ds, weights, sampler_length, loader_kwargs):
-    sampler = WeightedRandomSampler(weights, sampler_length, replacement=True)
-    return DataLoader(train_ds, sampler=sampler, **loader_kwargs)
-
-
 # Orchestrates one pretraining run: setup, train+probe loop, checkpoint, summary.
 def main():
     cfg = load_config()
@@ -386,23 +381,7 @@ def main():
         "prefetch_factor": train_cfg["prefetch_factor"] if train_cfg["num_workers"] > 0 else None,
         "persistent_workers": train_cfg["persistent_workers"] and train_cfg["num_workers"] > 0,
     }
-    online_cfg = cfg["online_cluster_weighting"]
-    online_enabled = bool(online_cfg["enabled"])
-    if online_enabled:
-        update_every_steps = int(online_cfg["update_every_steps"])
-        num_clusters = int(cfg["prune"]["num_clusters"])
-        online_state = OnlineClusterWeighting(
-            train_ds.sample_weights,
-            torch.as_tensor(train_ds.cluster_of, dtype=torch.long),
-            num_clusters,
-            float(online_cfg["ema_decay"]),
-        )
-        sampler_length = batch_size * update_every_steps
-    else:
-        sampler_length = len(train_ds)
-    # always start with the weights that were baked into the train_ds 
-    # (which may or may not use the offline pruning work depending on sampling_intesity)
-    train_loader = make_train_loader(train_ds, train_ds.sample_weights, sampler_length, loader_kwargs)
+    online_sampler, window_samples, train_loader = setup_sampler(cfg, train_ds, batch_size, loader_kwargs)
     val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
 
     activation_checkpointing = bool(train_cfg["activation_checkpointing"])
@@ -562,7 +541,7 @@ def main():
 
     while stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples) is None:
         train_iterator = iter(train_loader)
-        window_steps = sampler_length // batch_size
+        window_steps = window_samples // batch_size
         for _ in range(window_steps):
             batch = next(train_iterator)
             if stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples) is not None:
@@ -609,8 +588,8 @@ def main():
                         ckpt=activation_checkpointing,
                     )
                     total_loss = dino_loss_value + ibot_loss + kde
-                if online_enabled:
-                    online_state.accumulate(batch["cluster_idx"], sample_losses, batch["tile"])
+                if online_sampler is not None:
+                    online_sampler.observe(batch, sample_losses)
                 opt.zero_grad(set_to_none=True)
                 total_loss.backward()
                 grad_norm = nn.utils.clip_grad_norm_(
@@ -736,15 +715,15 @@ def main():
             data_wait_started_at = time.monotonic()
             if stopping_reason(step, stop_step, train_flops, max_train_flops, examples_seen, batch_size, max_train_samples) is not None:
                 break
-        # if we use online sampling adaption, rebuild sampler at the end of window
-        if online_enabled:
-            online_state.update_weights(step, wandb_run)
-            # cleanup the old loader
-            if train_loader._iterator is not None:
-                train_loader._iterator._shutdown_workers()
-                train_loader._iterator = None
-            # create fresh loader with using the updated weight
-            train_loader = make_train_loader(train_ds, online_state.weights, sampler_length, loader_kwargs)
+        if online_sampler is not None:
+            train_loader = update_sampler_after_window(
+                online_sampler,
+                step,
+                wandb_run,
+                train_loader,
+                train_ds,
+                loader_kwargs,
+            )
     
     ########  TRAINING OVER  ########
 
@@ -753,9 +732,8 @@ def main():
     final_unique_counts = flush_unique_counts()
     if step > 0:
         # Final probes have their own readers; close pretraining workers before they compete for CPU/IO.
-        if train_cfg["num_workers"] > 0 and train_loader._iterator is not None:
-            train_loader._iterator._shutdown_workers()
-            train_loader._iterator = None
+        if train_cfg["num_workers"] > 0:
+            shutdown_loader_workers(train_loader)
         # Probes get their own short-lived checkpoint; retain the full checkpoint for resume/submission.
         if step != last_saved_step:
             save_latest_checkpoint(step)
