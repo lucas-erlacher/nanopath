@@ -5,37 +5,9 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
-from sklearn.cluster import KMeans
 
+from clustering_utils import cluster_embeddings, load_embeddings
 from utils import assert_shape, print_device
-
-
-def load_embeddings(embed_dir, cfg):
-    embed_paths = sorted((Path(embed_dir) / Path(cfg["prune"]["embedding_model"])).glob("*.embeddings.npz"))
-    if not embed_paths:
-        raise RuntimeError(f"no embedding shards found under {embed_dir}")
-
-    paths, embeddings = [], []
-    for embed_path in embed_paths:
-        data = np.load(embed_path, allow_pickle=False)
-        paths.extend(data["paths"].tolist())
-        embeddings.append(data["embeddings"])
-
-    return paths, np.concatenate(embeddings, axis=0)
-
-
-def cluster_embeddings(embeddings, n_clusters, seed):
-    kmeans = KMeans(
-        n_clusters=n_clusters,
-        random_state=seed,
-        n_init="auto",
-        verbose=1,
-    )
-
-    labels = kmeans.fit_predict(embeddings)
-    assigned_centroids = kmeans.cluster_centers_[labels]
-
-    return labels, assigned_centroids
 
 
 # vectorized over the number of embeddings dimension
@@ -71,17 +43,18 @@ def main():
     print_device("score_tiles")
     cfg = yaml.safe_load(Path(sys.argv[1]).read_text())
     embed_dir = Path(cfg["prune"]["embeddings_path"])
-    out_path = Path(cfg["prune"]["scores_path"]) / Path(cfg["prune"]["embedding_model"]) / "tile_scores.parquet"
+    out_path = Path(cfg["prune"]["scores_path"])
 
     paths, embeddings = load_embeddings(embed_dir, cfg)
 
     print("loaded embeddings")
 
-    cluster_labels, assigned_centroids = cluster_embeddings(
+    cluster_labels, cluster_centers = cluster_embeddings(
         embeddings,
         cfg["prune"]["num_clusters"],
         cfg["train"]["seed"],
     )
+    assigned_centroids = cluster_centers[cluster_labels]
 
     print("clustered embeddings")
 

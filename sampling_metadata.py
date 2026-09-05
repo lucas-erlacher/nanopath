@@ -18,7 +18,7 @@ def load_sampling_metadata(prune_cfg, paths, need_scores, need_cluster_ids, is_t
     if not is_train or not need_scores and not need_cluster_ids:
         return SamplingMetadata(None, cluster_ids)
 
-    scores_path = Path(prune_cfg["scores_path"]) / prune_cfg["embedding_model"] / "tile_scores.parquet"
+    scores_path = Path(prune_cfg["scores_path"])
     columns = ["path"]
     if need_scores:
         columns.append("score")

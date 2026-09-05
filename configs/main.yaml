@@ -32,7 +32,8 @@ prune:
   embedding_std: [0.5, 0.5, 0.5]
   embedding_model_batchsize: 2048
   embeddings_path: /content/drive/MyDrive/nanopath/tile_embeddings/
-  scores_path: /content/drive/MyDrive/nanopath/tile_scores/
+  scores_path: /content/drive/MyDrive/nanopath/tile_scores/hierarchical_tile_scores.parquet
+  hierarchical_cluster_counts: [35000, 350, 62, 1]
   num_clusters: 1024
   sampling_intensity: 0.0  # 0 is uniform sampling, 1 is fully score-weighted
   cut_score: null  # null keeps every tile; otherwise scores above this value are removed
