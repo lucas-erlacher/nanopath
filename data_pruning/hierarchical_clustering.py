@@ -1,10 +1,10 @@
 # Build hierarchical tile weights as a drop-in alternative to flat tile scores.
 
+import os
 import sys
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")  # hack needed to get matplotlib to work on colab
+os.environ["MPLBACKEND"] = "Agg"
 import matplotlib.pyplot as plt
 import numpy as np
 import pyarrow as pa
