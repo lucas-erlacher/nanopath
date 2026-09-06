@@ -29,7 +29,9 @@ def _build_mappings(datapoints, cluster_counts, seed):
         return [], []
 
     # cluster_ids is a 1D array containing for each datapoint the index of the centroid it was assigned to
+    print(f"clustering {len(datapoints):,} datapoints into {cluster_counts[0]:,} centroids", flush=True)
     cluster_ids, centroids = cluster_embeddings(datapoints, cluster_counts[0], seed)
+    print(f"finished clustering into {cluster_counts[0]:,} centroids", flush=True)
 
     volume_estimates = np.array([
         volume_estimate(centroids[c], datapoints[cluster_ids == c]) for c in range(len(centroids))
@@ -132,9 +134,11 @@ def sanity_check():
 
 def main():
     sanity_check()
+    print("loading embeddings", flush=True)
     cfg = yaml.safe_load(Path(sys.argv[1]).read_text())
     embeddings_dir = Path(cfg["prune"]["embeddings_path"])
     paths, embeddings = load_embeddings(embeddings_dir, cfg)
+    print(f"loaded {len(paths):,} embeddings", flush=True)
     cluster_counts = [int(count) for count in cfg["prune"]["hierarchical_cluster_counts"]]
 
     mappings, level_volume_estimates = build_hierarchy(
@@ -142,8 +146,10 @@ def main():
         cluster_counts,
         int(cfg["train"]["seed"]),
     )
+    print("hierarchy complete", flush=True)
 
     weights = hierarchical_weights(mappings)
+    print("weights complete", flush=True)
 
     # save the computed weights
     out_path = Path(cfg["prune"]["scores_path"])
@@ -156,8 +162,10 @@ def main():
         }),
         out_path,
     )
+    print(f"wrote scores to {out_path}", flush=True)
 
     plot_level_volumes(level_volume_estimates, out_path.parent / "level_volumes.png")
+    print(f"wrote level plot to {out_path.parent / 'level_volumes.png'}", flush=True)
 
 
 if __name__ == "__main__":
