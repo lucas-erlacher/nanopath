@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")  # hack needed to get matplotlib to work on colab
 import matplotlib.pyplot as plt
 import numpy as np
 import pyarrow as pa
