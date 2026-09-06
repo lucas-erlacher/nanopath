@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
-from clustering_utils import cluster_embeddings, load_embeddings
+from .clustering_utils import cluster_embeddings, load_embeddings
 
 
 ################    CLUSTERING HIERARCHY    ################
