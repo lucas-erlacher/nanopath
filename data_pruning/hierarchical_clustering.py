@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -23,11 +24,25 @@ def build_hierarchy(embeddings, cluster_counts, seed):
 
 def _build_mappings(datapoints, cluster_counts, seed):
     if not cluster_counts:
-        return []
+        return [], []
 
     # cluster_ids is a 1D array containing for each datapoint the index of the centroid it was assigned to
     cluster_ids, centroids = cluster_embeddings(datapoints, cluster_counts[0], seed)
-    return [cluster_ids] + _build_mappings(centroids, cluster_counts[1:], seed)
+
+    volume_estimates = np.array([
+        volume_estimate(centroids[c], datapoints[cluster_ids == c]) for c in range(len(centroids))
+    ])
+
+    child_mappings, child_volume_estimates = _build_mappings(centroids, cluster_counts[1:], seed)
+    return [cluster_ids] + child_mappings, [volume_estimates] + child_volume_estimates
+
+
+def volume_estimate(centroid, cluster_points, top_k=10):
+    # spread of a cluster: mean distance to centroid, over its top_k farthest members
+    if len(cluster_points) == 0:
+        return np.nan
+    dists = np.linalg.norm(cluster_points - centroid, axis=1)
+    return np.sort(dists)[-top_k:].mean()
 
 
 ################    WEIGHT COMPUTATION    ################
@@ -69,13 +84,42 @@ def split_budget(budget, parent_centroid_id, mappings, weights):
             split_budget(child_budget, child_centroid_id, mappings[:-1], weights)
 
 
+################    PLOTTING    ################
+
+
+def plot_level_volumes(level_volume_estimates, out_path):
+    level_labels = [f"L{i}" for i in range(len(level_volume_estimates))]
+    clean = [v[~np.isnan(v)] for v in level_volume_estimates]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+
+    axes[0].boxplot(clean, labels=level_labels)
+    axes[0].set_xlabel("hierarchy level (0 = leaf ... top = root)")
+    axes[0].set_ylabel("volume estimate (mean top-10 distance to centroid)")
+    axes[0].set_title("Cluster volume by level")
+    axes[0].grid(axis="y", alpha=0.25)
+
+    cvs = [v.std() / v.mean() for v in clean]
+    axes[1].plot(range(len(clean)), cvs, marker="o")
+    axes[1].set_xticks(range(len(clean)))
+    axes[1].set_xticklabels(level_labels)
+    axes[1].set_xlabel("hierarchy level (0 = leaf ... top = root)")
+    axes[1].set_ylabel("coefficient of variation of volume")
+    axes[1].set_title("Volume-of-volumes by level (want: decreasing)")
+    axes[1].grid(alpha=0.25)
+
+    plt.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
 ################    MAIN    ################
 
 
 def sanity_check():
     # small end-to-end check: five data points, three centroids, and one root centroid.
     test_embeddings = np.array([[0, 0], [0, 1], [10, 10], [10, 11], [20, 20]], dtype=np.float32)
-    test_mappings = build_hierarchy(test_embeddings, [3, 1], seed=0)
+    test_mappings, _ = build_hierarchy(test_embeddings, [3, 1], seed=0)
     test_weights = hierarchical_weights(test_mappings)
     expected_weights = np.array([1 / 6, 1 / 6, 1 / 6, 1 / 6, 1 / 3])
     assert len(test_mappings) == 2
@@ -91,7 +135,7 @@ def main():
     paths, embeddings = load_embeddings(embeddings_dir, cfg)
     cluster_counts = [int(count) for count in cfg["prune"]["hierarchical_cluster_counts"]]
 
-    mappings = build_hierarchy(
+    mappings, level_volume_estimates = build_hierarchy(
         embeddings,
         cluster_counts,
         int(cfg["train"]["seed"]),
@@ -110,6 +154,8 @@ def main():
         }),
         out_path,
     )
+
+    plot_level_volumes(level_volume_estimates, out_path.parent / "level_volumes.png")
 
 
 if __name__ == "__main__":
