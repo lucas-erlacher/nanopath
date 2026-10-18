@@ -991,18 +991,20 @@ def slide_linear_auc_metrics(embs, labels):
 def worker_probe_transforms(cfg):
     # Frozen baselines set transform_policy explicitly; Nanopath training runs fall back to model.py.
     policy = cfg["probe"].get("transform_policy")
+    from torchvision import transforms
     if policy is None:
         from model import probe_transforms
-        return probe_transforms()
-    from torchvision import transforms
-    from torchvision.transforms import InterpolationMode
-    image = {
-        "resize_crop_224": transforms.Compose([transforms.Resize(224, antialias=True), transforms.CenterCrop(224), transforms.ToTensor()]),
-        "bicubic224_crop224": transforms.Compose([transforms.Resize(224, interpolation=InterpolationMode.BICUBIC, antialias=True), transforms.CenterCrop(224), transforms.ToTensor()]),
-        "bicubic256_crop224": transforms.Compose([transforms.Resize(256, interpolation=InterpolationMode.BICUBIC, antialias=True), transforms.CenterCrop(224), transforms.ToTensor()]),
-        "square_224": transforms.Compose([transforms.Resize((224, 224), antialias=True), transforms.ToTensor()]),
-    }[policy]
-    return image, image
+        image, patch_image = probe_transforms()
+    else:
+        from torchvision.transforms import InterpolationMode
+        image = {
+            "resize_crop_224": transforms.Compose([transforms.Resize(224, antialias=True), transforms.CenterCrop(224), transforms.ToTensor()]),
+            "bicubic224_crop224": transforms.Compose([transforms.Resize(224, interpolation=InterpolationMode.BICUBIC, antialias=True), transforms.CenterCrop(224), transforms.ToTensor()]),
+            "bicubic256_crop224": transforms.Compose([transforms.Resize(256, interpolation=InterpolationMode.BICUBIC, antialias=True), transforms.CenterCrop(224), transforms.ToTensor()]),
+            "square_224": transforms.Compose([transforms.Resize((224, 224), antialias=True), transforms.ToTensor()]),
+        }[policy]
+        patch_image = image
+    return image, patch_image
 
 
 def run_probe_job(request_path):

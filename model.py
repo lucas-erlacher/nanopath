@@ -173,6 +173,25 @@ class ViT(nn.Module):
             "patches": x[:, 1 + self.registers :],
         }
 
+    def register_interpretability_hooks(self, storage_dict):
+        layer_names = []
+
+        def make_hook(name):
+            def hook(module, inputs, output):
+                storage_dict[name] = {
+                    "patch": output[:, 1 + self.registers :].detach(),
+                    "cls": output[:, :1].detach(),
+                    "register": output[:, 1 : 1 + self.registers].detach(),
+                }
+
+            return hook
+
+        for block_index, block in enumerate(self.blocks):
+            name = f"block_{block_index}"
+            block.register_forward_hook(make_hook(name))
+            layer_names.append(name)
+        return layer_names
+
     # Default probe contract: encode_image returns patches for segmentation
     # and probe_features returns CLS for pooled probes. Recipes may override either method
     # to define their test-time feature aggregation without changing the locked probe suite.
@@ -188,6 +207,13 @@ def load_pretrained(model):
     state = torch.hub.load_state_dict_from_url(model.pretrained_url, progress=False, map_location="cpu")
     model.load_state_dict(state, strict=True)
     return model
+
+
+def load_model(checkpoint_path, device):
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    model = ViT(variant=checkpoint["config"]["model"]["type"])
+    model.load_state_dict(checkpoint["model"], strict=True)
+    return model.to(device).eval()
 
 
 # DINO/iBOT projection head: 3-layer MLP (in -> hidden -> hidden -> bottleneck) + L2 norm +
