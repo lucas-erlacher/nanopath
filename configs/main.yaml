@@ -119,7 +119,7 @@ probe:
 interpret:
   checkpoint_path: /data/$USER/nanopath/main/default/latest.pt
   model_weights: ema # `ema` or `model`, same meaning as probe.model_weights
-  output_dir: /data/$USER/nanopath/interpret/default
+  output_dir: /data/$USER/nanopath/interpret/default # top level; subdirectory <hash of extraction settings>/ holds chunks/ (+ paths.json) and results_<methods>.json
   seed: 42
   dataset: wilds # identifier of the dataset used in this run (key of `datasets`; class in interpret/datasets.py)
   datasets: # identifier -> its data path and the sample field the sampler balances over

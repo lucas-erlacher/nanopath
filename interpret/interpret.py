@@ -2,6 +2,7 @@ import os
 import sys
 import math
 import json
+import hashlib
 import random
 import yaml
 import torch
@@ -85,10 +86,12 @@ def extract_features_to_chunks(
     dataset: torch.utils.data.Dataset,
     transform,
     cfg: dict,
+    output_dir: str,
 ):
-    # cfg is the top-level `interpret` config; `preprocess` holds the extraction knobs.
+    # cfg is the top-level `interpret` config; `preprocess` holds the extraction knobs. Chunks and paths.json go to
+    # output_dir (the `chunks/` folder inside main()'s settings-hash subdirectory); paths.json is written last.
     # No device moves here: the model arrives on its device and `transform` already outputs tensors on it.
-    output_dir, seed = cfg["output_dir"], cfg["seed"]
+    seed = cfg["seed"]
     chunk_size, layer_stride = cfg["preprocess"]["chunk_size"], cfg["preprocess"]["layer_stride"]
     # Sample stratified over the dataset's configured stratification dimension (see datasets.py): shuffle the samples
     # of each value, rank them by position inside it, then take the lowest ranks first. Every value contributes
@@ -245,17 +248,31 @@ def main():
 
     # One dataset per run: `dataset` names it, `datasets` holds each identifier's path and stratification dimension.
     dataset = load_dataset(icfg["dataset"], icfg["datasets"][icfg["dataset"]])
-    print("Extracting features...")
-    extract_features_to_chunks(model, dataset, transform, icfg)
+
+    # Layout: output_dir/<hash of everything that determines the chunks>/{chunks/ (chunk_N.pt + paths.json), results_<methods>.json}.
+    # An existing hash subdirectory is reused as is; if its run died, paths.json (written last) is missing and loading it
+    # below crashes, so delete that subdirectory by hand and rerun.
+    settings = {
+        "checkpoint_path": icfg["checkpoint_path"], "checkpoint_step": checkpoint["step"], "model_weights": icfg["model_weights"],
+        "dataset": icfg["dataset"], "dataset_config": icfg["datasets"][icfg["dataset"]], "seed": icfg["seed"],
+        "num_samples": icfg["preprocess"]["num_samples"], "layer_stride": icfg["preprocess"]["layer_stride"],
+    }
+    run_dir = Path(icfg["output_dir"]) / hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:10]
+    if run_dir.exists():
+        print(f"Reusing extraction in {run_dir}")
+    else:
+        print(f"Extracting features into {run_dir}...")
+        extract_features_to_chunks(model, dataset, transform, icfg, str(run_dir / "chunks"))
 
     # Each method is a class built as Method(data, its YAML sub-block); run() returns a results dict.
     # Track A methods read the saved chunks; a Track B method would be handed the model/loader instead.
-    chunks = ChunkedFeatureDataset(os.path.join(icfg["output_dir"], "paths.json"))
+    chunks = ChunkedFeatureDataset(str(run_dir / "chunks" / "paths.json"))
     results = {}
     for name in icfg["methods"]:
         print(f"Running {name}...")
         results[name] = {"effective_rank": EffectiveRank}[name](chunks, icfg[name]).run()
-    (Path(icfg["output_dir"]) / "results.json").write_text(json.dumps(results, indent=2))
+    # The file name lists the methods that ran, so runs with different method subsets don't overwrite each other.
+    (run_dir / f"results_{'_'.join(sorted(icfg['methods']))}.json").write_text(json.dumps(results, indent=2))
     print(json.dumps(results, indent=2))
 
 if __name__ == "__main__":
