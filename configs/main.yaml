@@ -114,24 +114,23 @@ probe:
     surgen: /data/surgen
     ucla_lung: /data/ucla-lung
 
-# Interpretability rig: `python -m interpret.interpret configs/main.yaml`.
-# Top level = which model/data/where to write; `extract` = feature extraction; one sub-block per method.
+# Interpretability rig, see interpret/README.md
 interpret:
   checkpoint_path: /data/$USER/nanopath/main/default/latest.pt
-  model_weights: ema # `ema` or `model`, same meaning as probe.model_weights
-  output_dir: /data/$USER/nanopath/interpret/default # top level; subdirectory <hash of extraction settings>/ holds chunks/ (+ metadata.json) and results_<methods>.json
-  dataset: wilds # identifier of the dataset used in this run (key of `datasets`; class in interpret/datasets.py)
-  datasets: # identifier -> its data path and the sample field the sampler balances over
+  model_weights: ema # ema | model
+  output_dir: /data/$USER/nanopath/interpret/default
+  dataset: wilds
+  datasets:
     wilds:
       path: /data/thunder-data/wilds
-      stratification_dimension: tumor
-  methods: [effective_rank] # which methods main() runs; each has its own sub-block below and its own file in interpret/
+      stratification_dimension: tumor # sample field the sampler balances over
+  methods: [effective_rank]
   extract:
-    seed: 42 # sampling seed: the same seed and dataset draw the same samples for every model
-    num_samples: 1000 # samples drawn from the full dataset, balanced over its stratification dimension
+    seed: 42
+    num_samples: 1000 # stratified subsample of the dataset
     batch_size: 32
-    num_workers: 4 # DataLoader workers that decode the images (preprocessing and the model run in the main process)
+    num_workers: 4 # image decoding only
     chunk_size: 500 # samples per chunk_N.pt file
-    layer_stride: 2 # keep every n-th layer, counted from the last layer. ViT-S at stride 2 is ~3 MB/sample incl. image (~10k samples per 32 GB)
+    layer_stride: 2 # every n-th layer, counted from the last; ~3 MB/sample for ViT-S
   effective_rank:
     singular_value_eps: 1.0e-9
