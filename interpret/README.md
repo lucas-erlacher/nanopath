@@ -16,7 +16,8 @@ Nanopath checkpoint (it carries its training `config`, its `step` and the `model
   `replace=False` and `stratify=`: a seeded subsample that keeps the proportions of the stratification dimension.
   `num_samples` must not exceed the dataset size.
 - `extract.{seed, num_samples, batch_size, num_workers, chunk_size, layer_stride}`: `layer_stride` keeps every n-th
-  layer counted from the last (the last is always kept); `num_workers` only parallelizes image decoding.
+  layer counted from the last (the last is always kept); `num_workers` only parallelizes image decoding; `chunk_size` is
+  rounded up to a whole number of batches.
 - `methods` + one sub-block per method (e.g. `effective_rank`).
 
 Storage per sample is `kept_layers x 257 tokens x C x 4 bytes` (float32) plus the 0.6 MB input image; for ViT-S (C=384)
@@ -27,9 +28,12 @@ that is about 3.4 MB at stride 2 and 2.2 MB at stride 4, so a 500-sample chunk i
 ```
 output_dir/                      # from the config
   <hash>/                        # hash of everything that determines the chunks (checkpoint + step, weights, dataset + its config, seed, num_samples, layer_stride)
-    chunks/                      # chunk_N.pt files + metadata.json (settings, git commit, chunk size, kept layers, sampled dataset indices); metadata.json is written last
+    chunks/                      # chunk_N.pt files + metadata.json (settings, git commit, samples per chunk, kept layers, sampled dataset indices); metadata.json is written last
     results_<methods>.json       # one per set of methods that ran, e.g. results_effective_rank.json
 ```
+
+Each `chunk_N.pt` is one dict: `images` `(N, 3, H, W)`, `metadata` (a list of N dicts) and `layers`
+`{layer: {group: (N, T, C)}}`, all float32.
 
 An existing `<hash>/` directory is reused without re-extracting. If a run died, its `chunks/metadata.json` is missing and
 loading crashes: delete that `<hash>/` directory and rerun.
