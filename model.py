@@ -174,6 +174,8 @@ class ViT(nn.Module):
         }
 
     def register_interpretability_hooks(self, storage_dict):
+        # Interpretability hooks: returns ordered layer keys and fills storage_dict with named token groups per
+        # layer. The full contract every model must follow is in interpret/README.md.
         layer_names = []
 
         def make_hook(name):

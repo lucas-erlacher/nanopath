@@ -26,6 +26,8 @@ def assert_hook_interface(
     batch_size: int,
     global_state: Dict[str, Any],
 ):
+    """Validates the hook contract documented in interpret/README.md.
+    Add new checks here whenever a new contract property is identified, and document it there too."""
     assert len(layer_names) == len(set(layer_names)), "Duplicate layer keys in returned list."
 
     for layer in layer_names:
@@ -70,25 +72,13 @@ def _process_single_sample_features(
     storage_dict: Dict[str, Dict[str, torch.Tensor]],
     kept_layer_names: List[str],
     batch_idx: int,
-    on_nonfinite: str
 ) -> Dict[str, Dict[str, torch.Tensor]]:
-    """Helper to flatten the extraction loop and handle precision casting (devices are main()'s job)."""
-    sample_layers = {}
-    for layer in kept_layer_names:
-        sample_layers[layer] = {}
-        for group_name, tensor in storage_dict[layer].items():
-            item_tensor = tensor[batch_idx]
-            formatted_tensor = item_tensor.to(dtype=torch.float16).contiguous()
-
-            if not torch.isfinite(formatted_tensor).all():
-                msg = f"Non-finite float16 values in {layer}:{group_name}."
-                if on_nonfinite == 'raise':
-                    raise ValueError(msg)
-                print(f"WARNING: {msg}")
-
-            sample_layers[layer][group_name] = formatted_tensor
-
-    return sample_layers
+    """Helper to slice one sample out of the batch for the kept layers (devices are main()'s job).
+    copy=True gives each sample its own storage, since saving a view would serialize the whole batch."""
+    return {
+        layer: {group: tensor[batch_idx].to(torch.float32, copy=True) for group, tensor in storage_dict[layer].items()}
+        for layer in kept_layer_names
+    }
 
 def extract_features_to_chunks(
     model: nn.Module,
@@ -99,7 +89,7 @@ def extract_features_to_chunks(
     # cfg is the top-level `interpret` config; `preprocess` holds the extraction knobs.
     # No device moves here: the model arrives on its device and `transform` already outputs tensors on it.
     output_dir, seed = cfg["output_dir"], cfg["seed"]
-    chunk_size, layer_stride, on_nonfinite = cfg["preprocess"]["chunk_size"], cfg["preprocess"]["layer_stride"], cfg["preprocess"]["on_nonfinite"]
+    chunk_size, layer_stride = cfg["preprocess"]["chunk_size"], cfg["preprocess"]["layer_stride"]
     # Sample stratified by tumor vs. healthy (the primary pathology axis; patients/hospitals are left at their natural
     # frequencies): shuffle each class, rank tiles by their position inside it, then take the lowest ranks first. Every
     # class contributes equally (a class that runs dry gives up all it has), and the draw is deterministic given the seed.
@@ -142,9 +132,7 @@ def extract_features_to_chunks(
             assert_hook_interface(storage_dict, layer_names, batch_size, interface_state)
 
             for b in range(batch_size):
-                sample_features = _process_single_sample_features(
-                    storage_dict, kept_layer_names, b, on_nonfinite
-                )
+                sample_features = _process_single_sample_features(storage_dict, kept_layer_names, b)
 
                 datapoint = {
                     "image": processed_images[b],

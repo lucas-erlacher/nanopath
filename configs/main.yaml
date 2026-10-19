@@ -126,7 +126,6 @@ interpret:
     num_samples: 1000 # tiles drawn (seeded), balanced between tumor and healthy tiles from the full dataset
     batch_size: 32
     chunk_size: 500 # samples per chunk_N.pt file
-    layer_stride: 1 # keep every n-th layer, counted from the last layer
-    on_nonfinite: raise # raise | warn
+    layer_stride: 2 # keep every n-th layer, counted from the last layer. ViT-S at stride 2 is ~3 MB/sample incl. image (~10k samples per 32 GB)
   effective_rank:
     singular_value_eps: 1.0e-9
