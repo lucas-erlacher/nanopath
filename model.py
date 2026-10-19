@@ -9,6 +9,8 @@
 # DINO CLS / iBOT patch self-distillation losses. It is intentionally trivial
 # (~15 lines) so we have zero runtime dependency on the dinov2 codebase.
 
+from functools import partial
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -173,18 +175,16 @@ class ViT(nn.Module):
             "patches": x[:, 1 + self.registers :],
         }
 
+    # Forward hook body for the interpretability rig: stores the patch and CLS tokens of a layer's output.
+    def _store_tokens(self, storage_dict, name, module, inputs, output):
+        storage_dict[name] = {"patch": output[:, 1 + self.registers :].detach(), "cls": output[:, :1].detach()}
+
     def register_interpretability_hooks(self, storage_dict):
         # Returns the hooked layer keys in forward order; the contract is in interpret/README.md.
-        def make_hook(name):
-            def hook(module, inputs, output):
-                storage_dict[name] = {"patch": output[:, 1 + self.registers :].detach(), "cls": output[:, :1].detach()}
-
-            return hook
-
         # Every block output, then the final norm last (what the probes consume).
         modules = {f"block_{i}": block for i, block in enumerate(self.blocks)} | {"norm": self.norm}
         for name, module in modules.items():
-            module.register_forward_hook(make_hook(name))
+            module.register_forward_hook(partial(self._store_tokens, storage_dict, name))
         return list(modules)
 
     # Default probe contract: encode_image returns patches for segmentation
