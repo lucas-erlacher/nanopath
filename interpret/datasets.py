@@ -7,8 +7,8 @@ import torch
 from probe import DATASET_ROOTS
 
 
-# PathoROB Camelyon tiles, stored as parquet image bytes like in probe.py's PathoROB probe (same tables and columns);
-# metadata: slide_id, biological_class (tumor/normal), medical_center (technical factor).
+# PathoROB Camelyon tiles, loaded as in probe.py's PathoROB probe. Reimplemented because that code is inline in a larger
+# function and returns only the transformed image; we also expose the metadata: slide_id, biological_class, medical_center.
 class PathoRobCamelyonDataset(torch.utils.data.Dataset):
     def __init__(self):
         table = pa.concat_tables([pq.read_table(f) for f in sorted((DATASET_ROOTS["pathorob"] / "camelyon").glob("data/*.parquet"))])
