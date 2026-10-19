@@ -31,3 +31,4 @@ class WildsDataset(torch.utils.data.Dataset):
 def load_dataset(identifier, dataset_cfg):
     if identifier == "wilds":
         return WildsDataset(dataset_cfg["path"], dataset_cfg["stratification_dimension"])
+    raise KeyError(f"Unknown dataset '{identifier}'; add it to load_dataset in interpret/datasets.py")

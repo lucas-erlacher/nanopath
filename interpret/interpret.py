@@ -234,6 +234,8 @@ def main():
         print(f"Running {name}...")
         if name == "effective_rank":
             results[name] = EffectiveRank(chunks, icfg[name]).run()
+        else:
+            raise KeyError(f"Unknown method '{name}'; add it to the method dispatch in main() of interpret/interpret.py")
     # The file name lists the methods that ran, so runs with different method subsets don't overwrite each other.
     (run_dir / f"results_{'_'.join(sorted(icfg['methods']))}.json").write_text(json.dumps(results, indent=2))
     print(json.dumps(results, indent=2))
