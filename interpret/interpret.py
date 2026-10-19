@@ -1,7 +1,9 @@
 import os
+import sys
 import math
 import json
 import random
+import yaml
 import torch
 import torch.nn as nn
 from torchvision import transforms
@@ -9,7 +11,7 @@ from typing import Dict, List, Any
 from pathlib import Path
 from PIL import Image
 
-from model import load_model
+from model import ViT
 from probe import worker_probe_transforms
 
 
@@ -17,7 +19,7 @@ from probe import worker_probe_transforms
 # INTERPRETABILITY ANALYSIS
 # -------------------------------------------------------------------------------------------------
 
-def run_effective_rank_analysis(dataset: torch.utils.data.Dataset) -> dict:
+def run_effective_rank_analysis(dataset: torch.utils.data.Dataset, cfg: dict) -> dict:
     collected = {"gap": {}, "cls": {}}
 
     for i in range(len(dataset)):
@@ -55,7 +57,7 @@ def run_effective_rank_analysis(dataset: torch.utils.data.Dataset) -> dict:
             else:
                 singular_values = torch.linalg.svdvals(features)
 
-            singular_values = singular_values[singular_values > 1e-9]
+            singular_values = singular_values[singular_values > cfg["singular_value_eps"]]
             if len(singular_values) == 0:
                 layer_results[f"{representation_name}_effective_rank"] = 0.0
                 continue
@@ -122,13 +124,13 @@ def _process_single_sample_features(
     batch_idx: int,
     on_nonfinite: str
 ) -> Dict[str, Dict[str, torch.Tensor]]:
-    """Helper to flatten the extraction loop and handle precision/device casting."""
+    """Helper to flatten the extraction loop and handle precision casting (devices are main()'s job)."""
     sample_layers = {}
     for layer in kept_layer_names:
         sample_layers[layer] = {}
         for group_name, tensor in storage_dict[layer].items():
             item_tensor = tensor[batch_idx]
-            formatted_tensor = item_tensor.to(dtype=torch.float16, device="cpu").contiguous()
+            formatted_tensor = item_tensor.to(dtype=torch.float16).contiguous()
 
             if not torch.isfinite(formatted_tensor).all():
                 msg = f"Non-finite float16 values in {layer}:{group_name}."
@@ -143,19 +145,17 @@ def _process_single_sample_features(
 def extract_features_to_chunks(
     model: nn.Module,
     dataset: torch.utils.data.Dataset,
-    output_dir: str,
     transform,
-    chunk_size: int = 500,
-    num_samples: int = 1000,
-    layer_stride: int = 1,
-    seed: int = 42,
-    on_nonfinite: str = 'raise'
+    cfg: dict,
 ):
-    random.seed(seed)
+    # cfg is the top-level `interpret` config; `preprocess` holds the extraction knobs.
+    # No device moves here: the model arrives on its device and `transform` already outputs tensors on it.
+    output_dir, seed = cfg["output_dir"], cfg["seed"]
+    chunk_size, layer_stride, on_nonfinite = cfg["preprocess"]["chunk_size"], cfg["preprocess"]["layer_stride"], cfg["preprocess"]["on_nonfinite"]
     num_available = len(dataset)
-    sampled_indices = random.sample(range(num_available), min(num_samples, num_available))
+    sampled_indices = random.Random(seed).sample(range(num_available), min(cfg["preprocess"]["num_samples"], num_available))
     subset = torch.utils.data.Subset(dataset, sampled_indices)
-    loader = torch.utils.data.DataLoader(subset, batch_size=32, shuffle=False, collate_fn=lambda batch: tuple(zip(*batch)))
+    loader = torch.utils.data.DataLoader(subset, batch_size=cfg["preprocess"]["batch_size"], shuffle=False, collate_fn=lambda batch: tuple(zip(*batch)))
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -189,13 +189,9 @@ def extract_features_to_chunks(
                     storage_dict, kept_layer_names, b, on_nonfinite
                 )
 
-                label_val = batch_labels[b]
-                if torch.is_tensor(label_val):
-                    label_val = label_val.cpu()
-
                 datapoint = {
-                    "image": processed_images[b].cpu(),
-                    "label": label_val,
+                    "image": processed_images[b],
+                    "label": batch_labels[b],
                     "layers": sample_features
                 }
                 current_chunk_data.append(datapoint)
@@ -302,23 +298,35 @@ def load_dataset(cfg) -> torch.utils.data.Dataset:
     return WildsDataset(root, records)
 
 
-def main(checkpoint_path: str = None, num_samples: int = 1000):
-    if checkpoint_path is None:
-        raise ValueError("checkpoint_path is required")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    model = load_model(checkpoint_path, torch.device("cuda"))
-    transform = evaluation_preprocess(checkpoint["config"])
-    print(f"Loaded checkpoint from {checkpoint_path}")
+def load_model(checkpoint, model_weights):
+    """Build the evaluated model from a Nanopath checkpoint dict (same weight-key choice as probe.py).
+    To interpret another model, swap this function; the rig only needs `register_interpretability_hooks`."""
+    model = ViT(variant=checkpoint["config"]["model"]["type"])
+    model.load_state_dict(checkpoint[{"ema": "model_ema", "model": "model"}[model_weights]], strict=True)
+    return model.eval()
+
+
+# DEVICE PRINCIPLE: main() is the only place that moves tensors or modules between devices. Every other
+# function computes on whatever device its inputs already live on, so there is exactly one place to read
+# to see who is where.
+def main():
+    # Usage (from repo root, so `model`/`probe` import): python -m interpret.interpret configs/main.yaml (expandvars resolves `$USER`, as in train.py).
+    cfg = yaml.safe_load(os.path.expandvars(Path(sys.argv[1]).read_text()))
+    icfg = cfg["interpret"]
+    checkpoint = torch.load(icfg["checkpoint_path"], map_location="cpu", weights_only=False)
+    model = load_model(checkpoint, icfg["model_weights"]).to("cuda")
+    # Eval preprocessing comes from the checkpoint's own training config; the final Lambda puts each
+    # preprocessed image on the GPU so extract_features_to_chunks never has to move anything itself.
+    transform = transforms.Compose([evaluation_preprocess(checkpoint["config"]), transforms.Lambda(lambda x: x.to("cuda"))])
+    print(f"Loaded checkpoint from {icfg['checkpoint_path']}")
 
     dataset = load_dataset(checkpoint["config"])
-    output_dir = "./interp_chunks"
     print("Extracting features...")
-    extract_features_to_chunks(model, dataset, output_dir, transform, num_samples=num_samples)
+    extract_features_to_chunks(model, dataset, transform, icfg)
 
-    paths_file = os.path.join(output_dir, "paths.json")
     print("Computing Effective Rank...")
-    dataset = ChunkedFeatureDataset(paths_file)
-    er_results = run_effective_rank_analysis(dataset)
+    dataset = ChunkedFeatureDataset(os.path.join(icfg["output_dir"], "paths.json"))
+    er_results = run_effective_rank_analysis(dataset, icfg["effective_rank"])
 
     for layer, metrics in er_results.items():
         cls_str = f", CLS ER: {metrics['cls_effective_rank']:.2f}" if metrics['cls_effective_rank'] else ""

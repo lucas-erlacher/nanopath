@@ -113,3 +113,19 @@ probe:
     pathorob: /data/pathorob
     surgen: /data/surgen
     ucla_lung: /data/ucla-lung
+
+# Interpretability rig: `python -m interpret.interpret configs/main.yaml`.
+# Top level = which model/data/where to write; `preprocess` = feature extraction; one sub-block per method.
+interpret:
+  checkpoint_path: /data/$USER/nanopath/main/default/latest.pt
+  model_weights: ema # `ema` or `model`, same meaning as probe.model_weights
+  output_dir: /data/$USER/nanopath/interpret/default
+  seed: 42
+  preprocess:
+    num_samples: 1000 # tiles drawn at random (seeded) from the full dataset
+    batch_size: 32
+    chunk_size: 500 # samples per chunk_N.pt file
+    layer_stride: 1 # keep every n-th layer, counted from the last layer
+    on_nonfinite: raise # raise | warn
+  effective_rank:
+    singular_value_eps: 1.0e-9

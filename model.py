@@ -209,13 +209,6 @@ def load_pretrained(model):
     return model
 
 
-def load_model(checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    model = ViT(variant=checkpoint["config"]["model"]["type"])
-    model.load_state_dict(checkpoint["model"], strict=True)
-    return model.to(device).eval()
-
-
 # DINO/iBOT projection head: 3-layer MLP (in -> hidden -> hidden -> bottleneck) + L2 norm +
 # weight-normed Linear(bottleneck -> n_prototypes) with weight_g frozen at 1, matching the
 # behaviour of dinov2.layers.DINOHead. Standalone reimplementation (no xformers, no fvcore).
