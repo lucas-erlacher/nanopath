@@ -13,64 +13,7 @@ from PIL import Image
 
 from model import ViT
 from probe import worker_probe_transforms
-
-
-# -------------------------------------------------------------------------------------------------
-# INTERPRETABILITY ANALYSIS
-# -------------------------------------------------------------------------------------------------
-
-def run_effective_rank_analysis(dataset: torch.utils.data.Dataset, cfg: dict) -> dict:
-    collected = {"gap": {}, "cls": {}}
-
-    for i in range(len(dataset)):
-        _, _, layers = dataset[i]
-
-        for layer_name, groups in layers.items():
-            if layer_name not in collected["gap"]:
-                collected["gap"][layer_name] = []
-                collected["cls"][layer_name] = []
-
-            # .clone() breaks the memory reference, preventing the chunk data tensor from causing an OOM leak in RAM.
-            gap_repr = groups["patch"].mean(dim=0).clone()
-            collected["gap"][layer_name].append(gap_repr)
-
-            if "cls" in groups:
-                # .clone() breaks the memory reference, preventing the chunk data tensor from causing an OOM leak in RAM.
-                cls_repr = groups["cls"][0].clone()
-                collected["cls"][layer_name].append(cls_repr)
-
-    results = {}
-    for layer_name in collected["gap"]:
-        layer_results = {}
-
-        for representation_name, representations in collected.items():
-            if not representations[layer_name]:
-                layer_results[f"{representation_name}_effective_rank"] = None
-                continue
-
-            features = torch.stack(representations[layer_name]).float()
-            features = features - features.mean(dim=0, keepdim=True)
-            sample_count, hidden_dim = features.shape
-            if sample_count > hidden_dim:
-                covariance = (features.T @ features) / (sample_count - 1)
-                singular_values = torch.sqrt(torch.relu(torch.linalg.eigvalsh(covariance)))
-            else:
-                singular_values = torch.linalg.svdvals(features)
-
-            singular_values = singular_values[singular_values > cfg["singular_value_eps"]]
-            if len(singular_values) == 0:
-                layer_results[f"{representation_name}_effective_rank"] = 0.0
-                continue
-
-            probabilities = singular_values / singular_values.sum()
-            entropy = -torch.sum(probabilities * torch.log(probabilities))
-            layer_results[f"{representation_name}_effective_rank"] = torch.exp(entropy).item()
-
-        results[layer_name] = layer_results
-
-    return results
-
-
+from interpret.effective_rank import EffectiveRank
 
 
 # -------------------------------------------------------------------------------------------------
@@ -341,13 +284,15 @@ def main():
     print("Extracting features...")
     extract_features_to_chunks(model, dataset, transform, icfg)
 
-    print("Computing Effective Rank...")
-    dataset = ChunkedFeatureDataset(os.path.join(icfg["output_dir"], "paths.json"))
-    er_results = run_effective_rank_analysis(dataset, icfg["effective_rank"])
-
-    for layer, metrics in er_results.items():
-        cls_str = f", CLS ER: {metrics['cls_effective_rank']:.2f}" if metrics['cls_effective_rank'] is not None else ""
-        print(f"[{layer}] GAP ER: {metrics['gap_effective_rank']:.2f}{cls_str}")
+    # Each method is a class built as Method(data, its YAML sub-block); run() returns a results dict.
+    # Track A methods read the saved chunks; a Track B method would be handed the model/loader instead.
+    chunks = ChunkedFeatureDataset(os.path.join(icfg["output_dir"], "paths.json"))
+    results = {}
+    for name in icfg["methods"]:
+        print(f"Running {name}...")
+        results[name] = {"effective_rank": EffectiveRank}[name](chunks, icfg[name]).run()
+    (Path(icfg["output_dir"]) / "results.json").write_text(json.dumps(results, indent=2))
+    print(json.dumps(results, indent=2))
 
 if __name__ == "__main__":
     main()
