@@ -178,7 +178,10 @@ class ViT(nn.Module):
     # Forward hook body for the interpretability rig: stores the patch and CLS tokens of a layer's output.
     # PyTorch passes (module, inputs, output) to every hook; only `output` is needed here.
     def _store_tokens(self, storage_dict, name, _module, _inputs, output):
-        storage_dict[name] = {"patch": output[:, 1 + self.registers :].detach(), "cls": output[:, :1].detach()}
+        storage_dict[name] = {
+            "patch": output[:, 1 + self.registers :, :].detach(),
+            "cls": output[:, 0, :].unsqueeze(1).detach(),
+        }
 
     def register_interpretability_hooks(self, storage_dict):
         # Returns the hooked layer keys in forward order; the contract is in interpret/README.md.

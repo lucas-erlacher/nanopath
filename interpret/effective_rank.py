@@ -16,7 +16,7 @@ class EffectiveRank:
             for layer_name, groups in layers.items():
                 collected["gap"][layer_name].append(groups["patch"].mean(dim=0))
                 # clone: a view would keep the whole loaded chunk alive
-                collected["cls"][layer_name].append(groups["cls"][0].clone())
+                collected["cls"][layer_name].append(groups["cls"][0, :].clone())
 
         results = {}
         for layer_name in collected["gap"]:

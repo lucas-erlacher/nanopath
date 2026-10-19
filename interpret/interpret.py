@@ -57,7 +57,7 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
 # Slices one sample out of the batch; copy=True because saving a view would serialize the whole batch.
 def _process_single_sample_features(storage_dict, kept_layer_names, batch_idx):
     return {
-        layer: {group: storage_dict[layer][group][batch_idx].to(torch.float32, copy=True) for group in REQUIRED_GROUPS}
+        layer: {group: storage_dict[layer][group][batch_idx, :, :].to(torch.float32, copy=True) for group in REQUIRED_GROUPS}
         for layer in kept_layer_names
     }
 
@@ -106,7 +106,7 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
                 # Sample format (read by ChunkedFeatureDataset): image, label = dataset metadata, layers {layer: {group: (T, C)}};
                 # the image is cloned because a view would keep the whole batch alive.
                 datapoint = {
-                    "image": processed_images[b].clone(),
+                    "image": processed_images[b, :, :, :].clone(),
                     "label": batch_labels[b],
                     "layers": sample_features
                 }
