@@ -122,7 +122,6 @@ interpret:
   dataset: wilds
   datasets:
     wilds:
-      path: /data/thunder-data/wilds
       stratification_dimension: tumor # sample field the sampler balances over
   extract:
     seed: 42

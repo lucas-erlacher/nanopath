@@ -179,8 +179,8 @@ class ViT(nn.Module):
     # PyTorch passes (module, inputs, output) to every hook; only `output` is needed here.
     def _store_tokens(self, storage_dict, name, _module, _inputs, output):
         storage_dict[name] = {
+            "cls": output[:, 0, :].unsqueeze(1).detach(),  # need unsqueeze because we are indexing instead of slicing
             "patch": output[:, 1 + self.registers :, :].detach(),
-            "cls": output[:, 0, :].unsqueeze(1).detach(),
         }
 
     def register_interpretability_hooks(self, storage_dict):

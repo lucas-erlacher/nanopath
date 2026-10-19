@@ -12,7 +12,7 @@ from torchvision import transforms
 from pathlib import Path
 
 from model import ViT
-from probe import worker_probe_transforms
+from probe import DATASET_ROOTS, worker_probe_transforms
 from interpret.datasets import load_dataset
 from interpret.effective_rank import EffectiveRank
 
@@ -65,11 +65,12 @@ def _process_single_sample_features(storage_dict, kept_layer_names, batch_idx):
 # Samples tiles (stratified, seeded), runs the model, checks the hook contract and writes chunk_N.pt files plus
 # metadata.json (last, so it marks a complete run). `settings` determines the chunks (hashed in main, saved in metadata.json).
 def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg, output_dir):
-    # Stratified draw over the dataset's stratification dimension (datasets.py): shuffle each value's samples, rank them
-    # within it, take the lowest ranks first. Values contribute equally (one that runs dry gives all it has); seeded.
+    # Stratified draw over the dataset's stratification dimension (a metadata field in dataset.records): shuffle each
+    # value's samples, rank them within it, take the lowest ranks first. Values contribute equally (one that runs dry gives all it has); seeded.
+    dimension = settings["dataset_config"]["stratification_dimension"]
     rng, groups = random.Random(settings["seed"]), {}
-    for i, value in enumerate(dataset.stratification_values):
-        groups.setdefault(value, []).append(i)
+    for i, (_, _, metadata) in enumerate(dataset.records):
+        groups.setdefault(metadata[dimension], []).append(i)
     ranked = []
     for members in groups.values():
         rng.shuffle(members)
@@ -195,8 +196,9 @@ def main():
     transform = transforms.Compose([evaluation_preprocess(checkpoint["config"]), transforms.Lambda(lambda x: x.to(device))])
     print(f"Loaded checkpoint from {icfg['checkpoint_path']}")
 
+    DATASET_ROOTS.update({k: Path(v) for k, v in cfg["probe"]["dataset_roots"].items()})  # as probe.py does in its worker
     dataset_cfg = icfg["datasets"][icfg["dataset"]]
-    dataset = load_dataset(icfg["dataset"], dataset_cfg)
+    dataset = load_dataset(icfg["dataset"])
 
     # Extractions are cached in output_dir/<hash of settings> (layout in README.md); if a run died, metadata.json is
     # missing and loading crashes below: delete that directory and rerun.

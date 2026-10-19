@@ -8,8 +8,9 @@ moves models or tensors (the loaded chunks go to the GPU, so methods compute on 
 ## Config (`interpret:` in `configs/main.yaml`)
 
 - `checkpoint_path`, `model_weights` (`ema` | `model`, as `probe.model_weights`): the model to analyse.
-- `dataset` + `datasets.<id>.{path, stratification_dimension}`: one dataset per run (classes in `datasets.py`). The
-  sampler balances over the stratification dimension, which only matters when `num_samples` is below the dataset size.
+- `dataset` + `datasets.<id>.stratification_dimension`: one dataset per run (classes in `datasets.py`); its data root
+  is `probe.dataset_roots.<id>`. The sampler balances over the stratification dimension, which only matters when
+  `num_samples` is below the dataset size.
 - `extract.{seed, num_samples, batch_size, num_workers, chunk_size, layer_stride}`: `layer_stride` keeps every n-th
   layer counted from the last (the last is always kept); `num_workers` only parallelizes image decoding.
 - `methods` + one sub-block per method (e.g. `effective_rank`).
@@ -67,8 +68,10 @@ Nothing else in the rig needs to change.
 
 ## Extending the rig
 
-- New dataset: a class in `datasets.py` returning `(PIL image, metadata dict)` and exposing `stratification_values` (one
-  value per sample); add it to `load_dataset` and a block under `datasets:` in the config.
+- New dataset: a class in `datasets.py` that reads its root from `DATASET_ROOTS` and its samples from `THUNDER_V2`
+  (both from `probe.py`), returns `(PIL image, metadata dict)` and exposes `records`, a list of `(split, image, metadata)`
+  per sample (the sampler balances over `metadata[stratification_dimension]`); add it to `load_dataset` and a block
+  under `datasets:` in the config.
 - New method: a class in its own file, `Method(chunks, method_cfg).run() -> results dict`; add it to the dispatch in `main()`
   and a sub-block (and an entry in `methods`) in the config.
 

@@ -1,33 +1,34 @@
-# interpret/datasets.py: one class per analysis dataset (with `stratification_values` for the sampler) and load_dataset().
-import json
+# interpret/datasets.py: one class per analysis dataset, exposing `records` (split, image, metadata) for the sampler.
 from pathlib import Path
 from PIL import Image
 import torch
+from probe import DATASET_ROOTS, THUNDER_V2
 
 
+# WILDS train + val tiles. Not probe.py's locked ClassificationDataset: it returns only (tensor, label), but we need the
+# patient/node metadata. We still reuse its data sources, THUNDER_V2 and DATASET_ROOTS.
 class WildsDataset(torch.utils.data.Dataset):
-    # Camelyon17-WILDS tiles from the thunder manifest (train + val); stratification dimensions: tumor, patient, node, split.
-    def __init__(self, path, stratification_dimension):
-        self.root = Path(path)
-        manifest = json.loads((Path(__file__).resolve().parent.parent / "benchmarking" / "thunder_v2.json").read_text())
-        self.records = []
+    def __init__(self):
+        self.root = DATASET_ROOTS["wilds"]
+        records = []
         for split in ("train", "val"):
-            spec = manifest["classification"]["wilds"][split]
+            spec = THUNDER_V2["classification"]["wilds"][split]
             for image, target in zip(spec["images"], spec["labels"]):
-                patient = next(part for part in Path(image).parts if part.startswith("patient_"))
-                self.records.append((image, {"split": split, "tumor": int(target), "patient": patient, "node": patient.rsplit("_", 1)[-1]}))
-        self.stratification_values = [metadata[stratification_dimension] for _, metadata in self.records]
+                parts = Path(image).parts
+                patient = next(part for part in parts if part.startswith("patient_"))
+                records.append((split, image, {"tumor": int(target), "patient": patient, "node": patient.rsplit("_", 1)[-1]}))
+        self.records = records
 
     def __len__(self):
         return len(self.records)
 
     def __getitem__(self, index):
-        image, metadata = self.records[index]
-        return Image.open(self.root / image).convert("RGB"), {"path": image, **metadata}
+        split, image, metadata = self.records[index]
+        return Image.open(self.root / image).convert("RGB"), {"split": split, "path": image, **metadata}
 
 
-# Builds the dataset named by `identifier` from its config block.
-def load_dataset(identifier, dataset_cfg):
+# Builds the dataset named by `identifier`.
+def load_dataset(identifier):
     if identifier == "wilds":
-        return WildsDataset(dataset_cfg["path"], dataset_cfg["stratification_dimension"])
+        return WildsDataset()
     raise KeyError(f"Unknown dataset '{identifier}'; add it to load_dataset in interpret/datasets.py")
