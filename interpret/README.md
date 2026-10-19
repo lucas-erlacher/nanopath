@@ -14,15 +14,15 @@ before every forward pass, so hooks must keep writing into the same dict object 
 
 ## What every hook must write
 
-`storage_dict[layer_name] = {group_name: tensor}` where:
+`storage_dict[layer_name] = {group_name: tensor}` with two REQUIRED groups (`REQUIRED_GROUPS` in `interpret.py`), the
+objects downstream methods consume:
 
-- Every tensor is detached with shape `(B, T, C)`: batch, tokens, hidden dim. `C` is identical across the groups of a
-  layer, and no group may be empty.
-- `"patch"` `(B, N, C)` is required. `N` must be a perfect square and the tokens in row-major order on the square grid.
-- `"cls"` `(B, 1, C)` is reserved and optional (the global summary token). Any other name (e.g. `"register"`) is a
-  free-form group that the rig ignores until a method uses it.
-- Groups are disjoint (a token is in exactly one group). Group names and per-group token counts are identical across
-  all layers and batches.
+- `"patch"` `(B, N, C)`: the patch tokens. `N` must be a perfect square and the tokens in row-major order on the square grid.
+- `"cls"` `(B, 1, C)`: the global summary token.
+- Each required tensor is detached with shape `(B, T, C)`: batch, tokens, hidden dim. `C` is identical across the two
+  groups of a layer, and neither may be empty.
+- Groups are disjoint (a token is in exactly one group). Token counts are identical across all layers and batches.
+- Any other group you write (e.g. `"register"`) is ignored: it is neither validated nor stored. Write it or not.
 - Tensors are written as-is: no pooling or flattening, no dtype casts, no device moves (the rig handles those).
 - Hooks only observe: they must not alter the forward pass or its outputs.
 

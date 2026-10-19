@@ -3,6 +3,7 @@ import sys
 import math
 import json
 import hashlib
+import subprocess
 import random
 import yaml
 import torch
@@ -21,6 +22,11 @@ from interpret.effective_rank import EffectiveRank
 # REPRESENTATION EXTRACTION
 # -------------------------------------------------------------------------------------------------
 
+# The token groups every hook MUST provide; the rig validates and stores only these. Downstream methods need the
+# patch tokens (spatial maps, GAP) and the CLS token (global summary). Any other group a hook writes is ignored.
+REQUIRED_GROUPS = ("patch", "cls")
+
+
 def assert_hook_interface(
     storage_dict: Dict[str, Dict[str, torch.Tensor]],
     layer_names: List[str],
@@ -33,10 +39,11 @@ def assert_hook_interface(
 
     for layer in layer_names:
         assert layer in storage_dict, f"Layer '{layer}' missing from hook output."
-        group_dict = storage_dict[layer]
-        assert "patch" in group_dict, f"Layer '{layer}' missing 'patch' group."
+        for group_name in REQUIRED_GROUPS:
+            assert group_name in storage_dict[layer], f"Layer '{layer}' missing required group '{group_name}'."
+        group_dict = {name: storage_dict[layer][name] for name in REQUIRED_GROUPS}  # extra groups are ignored
 
-        # Group names and per-group token counts are fixed by the first layer of the first batch and must
+        # Token counts of the required groups are fixed by the first layer of the first batch and must
         # then match for ALL layers and batches.
         current_tokens = {name: tensor.shape[1] for name, tensor in group_dict.items()}
         if global_state["expected_tokens"] is None:
@@ -77,7 +84,7 @@ def _process_single_sample_features(
     """Helper to slice one sample out of the batch for the kept layers (devices are main()'s job).
     copy=True gives each sample its own storage, since saving a view would serialize the whole batch."""
     return {
-        layer: {group: tensor[batch_idx].to(torch.float32, copy=True) for group, tensor in storage_dict[layer].items()}
+        layer: {group: storage_dict[layer][group][batch_idx].to(torch.float32, copy=True) for group in REQUIRED_GROUPS}
         for layer in kept_layer_names
     }
 
@@ -164,6 +171,7 @@ def extract_features_to_chunks(
             torch.save(current_chunk_data, chunk_path)
 
     paths_data = {
+        "git_commit": subprocess.check_output(["git", "describe", "--always", "--dirty"], cwd=Path(__file__).resolve().parent, text=True).strip(),  # exact code version; -dirty = uncommitted changes
         "dataset": cfg["dataset"],
         "seed": seed,
         "num_samples": cfg["preprocess"]["num_samples"],
