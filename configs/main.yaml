@@ -119,10 +119,10 @@ interpret:
   checkpoint_path: /data/$USER/nanopath/main/default/latest.pt
   model_weights: ema # ema | model
   output_dir: /data/$USER/nanopath/interpret/default
-  dataset: wilds
+  dataset: pathorob_camelyon
   datasets:
-    wilds:
-      stratification_dimension: tumor # sample field the sampler balances over
+    pathorob_camelyon:
+      stratification_dimension: biological_class # sample field the sampler balances over
   extract:
     seed: 42
     num_samples: 1000 # stratified subsample of the dataset
