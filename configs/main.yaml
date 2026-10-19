@@ -121,6 +121,11 @@ interpret:
   model_weights: ema # `ema` or `model`, same meaning as probe.model_weights
   output_dir: /data/$USER/nanopath/interpret/default
   seed: 42
+  dataset: wilds # identifier of the dataset used in this run (key of `datasets`; class in interpret/datasets.py)
+  datasets: # identifier -> its data path and the sample field the sampler balances over
+    wilds:
+      path: /data/thunder-data/wilds
+      stratification_dimension: tumor
   methods: [effective_rank] # which methods main() runs; each has its own sub-block below and its own file in interpret/
   preprocess:
     num_samples: 1000 # tiles drawn (seeded), balanced between tumor and healthy tiles from the full dataset

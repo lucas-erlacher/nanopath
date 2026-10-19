@@ -188,9 +188,9 @@ class ViT(nn.Module):
 
             return hook
 
-        for block_index, block in enumerate(self.blocks):
-            name = f"block_{block_index}"
-            block.register_forward_hook(make_hook(name))
+        # Every block output, then the final norm last: it is the representation the probes consume.
+        for name, module in [*((f"block_{i}", block) for i, block in enumerate(self.blocks)), ("norm", self.norm)]:
+            module.register_forward_hook(make_hook(name))
             layer_names.append(name)
         return layer_names
 

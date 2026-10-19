@@ -9,10 +9,10 @@ import torch.nn as nn
 from torchvision import transforms
 from typing import Dict, List, Any
 from pathlib import Path
-from PIL import Image
 
 from model import ViT
 from probe import worker_probe_transforms
+from interpret.datasets import load_dataset
 from interpret.effective_rank import EffectiveRank
 
 
@@ -90,12 +90,12 @@ def extract_features_to_chunks(
     # No device moves here: the model arrives on its device and `transform` already outputs tensors on it.
     output_dir, seed = cfg["output_dir"], cfg["seed"]
     chunk_size, layer_stride = cfg["preprocess"]["chunk_size"], cfg["preprocess"]["layer_stride"]
-    # Sample stratified by tumor vs. healthy (the primary pathology axis; patients/hospitals are left at their natural
-    # frequencies): shuffle each class, rank tiles by their position inside it, then take the lowest ranks first. Every
-    # class contributes equally (a class that runs dry gives up all it has), and the draw is deterministic given the seed.
+    # Sample stratified over the dataset's configured stratification dimension (see datasets.py): shuffle the samples
+    # of each value, rank them by position inside it, then take the lowest ranks first. Every value contributes
+    # equally (one that runs dry gives up all it has), and the draw is deterministic given the seed.
     rng, groups = random.Random(seed), {}
-    for i, (_, _, meta) in enumerate(dataset.records):
-        groups.setdefault(meta["tumor"], []).append(i)
+    for i, value in enumerate(dataset.stratification_values):
+        groups.setdefault(value, []).append(i)
     ranked = []
     for members in groups.values():
         rng.shuffle(members)
@@ -161,6 +161,7 @@ def extract_features_to_chunks(
             torch.save(current_chunk_data, chunk_path)
 
     paths_data = {
+        "dataset": cfg["dataset"],
         "seed": seed,
         "num_samples": cfg["preprocess"]["num_samples"],
         "checkpoint_path": cfg["checkpoint_path"],
@@ -179,18 +180,6 @@ def extract_features_to_chunks(
 # -------------------------------------------------------------------------------------------------
 # DATASET CLASSES
 # -------------------------------------------------------------------------------------------------
-
-class WildsDataset(torch.utils.data.Dataset):
-    def __init__(self, root, records):
-        self.root = root
-        self.records = records
-
-    def __len__(self):
-        return len(self.records)
-
-    def __getitem__(self, index):
-        split, image, metadata = self.records[index]
-        return Image.open(self.root / image).convert("RGB"), {"split": split, "path": image, **metadata}
 
 class ChunkedFeatureDataset(torch.utils.data.Dataset):
     def __init__(self, paths_file: str):
@@ -232,20 +221,6 @@ def evaluation_preprocess(cfg):
     std = torch.tensor(cfg["data"]["std"]).view(3, 1, 1)
     return transforms.Compose([transform, transforms.Lambda(lambda x: (x - mean) / std)])
 
-def load_dataset(cfg) -> torch.utils.data.Dataset:
-    root = Path(cfg["probe"]["dataset_roots"]["wilds"])
-    manifest = json.loads((Path(__file__).resolve().parent.parent / "benchmarking" / "thunder_v2.json").read_text())
-    records = []
-    for split in ("train", "val"):
-        spec = manifest["classification"]["wilds"][split]
-        for image, target in zip(spec["images"], spec["labels"]):
-            parts = Path(image).parts
-            patient = next(part for part in parts if part.startswith("patient_"))
-            records.append((split, image, {"tumor": int(target), "patient": patient, "node": patient.rsplit("_", 1)[-1]}))
-
-    return WildsDataset(root, records)
-
-
 def load_model(checkpoint, model_weights):
     """Build the evaluated model from a Nanopath checkpoint dict (same weight-key choice as probe.py).
     To interpret another model, swap this function; the rig only needs `register_interpretability_hooks`."""
@@ -268,7 +243,8 @@ def main():
     transform = transforms.Compose([evaluation_preprocess(checkpoint["config"]), transforms.Lambda(lambda x: x.to("cuda"))])
     print(f"Loaded checkpoint from {icfg['checkpoint_path']}")
 
-    dataset = load_dataset(checkpoint["config"])
+    # One dataset per run: `dataset` names it, `datasets` holds each identifier's path and stratification dimension.
+    dataset = load_dataset(icfg["dataset"], icfg["datasets"][icfg["dataset"]])
     print("Extracting features...")
     extract_features_to_chunks(model, dataset, transform, icfg)
 
