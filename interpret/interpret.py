@@ -7,9 +7,7 @@ import subprocess
 import random
 import yaml
 import torch
-import torch.nn as nn
 from torchvision import transforms
-from typing import Dict, List, Any
 from pathlib import Path
 
 from model import ViT
@@ -27,12 +25,7 @@ from interpret.effective_rank import EffectiveRank
 REQUIRED_GROUPS = ("patch", "cls")
 
 
-def assert_hook_interface(
-    storage_dict: Dict[str, Dict[str, torch.Tensor]],
-    layer_names: List[str],
-    batch_size: int,
-    global_state: Dict[str, Any],
-):
+def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
     """Validates the hook contract documented in interpret/README.md.
     Add new checks here whenever a new contract property is identified, and document it there too."""
     assert len(layer_names) == len(set(layer_names)), "Duplicate layer keys in returned list."
@@ -76,11 +69,7 @@ def assert_hook_interface(
                     f"Layer '{layer}' 'patch' length {tokens} not a perfect square."
                 )
 
-def _process_single_sample_features(
-    storage_dict: Dict[str, Dict[str, torch.Tensor]],
-    kept_layer_names: List[str],
-    batch_idx: int,
-) -> Dict[str, Dict[str, torch.Tensor]]:
+def _process_single_sample_features(storage_dict, kept_layer_names, batch_idx):
     """Helper to slice one sample out of the batch for the kept layers (devices are main()'s job).
     copy=True gives each sample its own storage, since saving a view would serialize the whole batch."""
     return {
@@ -88,13 +77,7 @@ def _process_single_sample_features(
         for layer in kept_layer_names
     }
 
-def extract_features_to_chunks(
-    model: nn.Module,
-    dataset: torch.utils.data.Dataset,
-    transform,
-    cfg: dict,
-    output_dir: str,
-):
+def extract_features_to_chunks(model, dataset, transform, cfg, output_dir):
     # cfg is the top-level `interpret` config; `preprocess` holds the extraction knobs. Chunks and paths.json go to
     # output_dir (the `chunks/` folder inside main()'s settings-hash subdirectory); paths.json is written last.
     # No device moves here: the model arrives on its device and `transform` already outputs tensors on it.
@@ -120,26 +103,22 @@ def extract_features_to_chunks(
     layer_names = model.register_interpretability_hooks(storage_dict)
     kept_layer_names = layer_names[::-layer_stride][::-1]
 
-    # State tracking to strictly enforce consistency across ALL layers and ALL batches
+    # Fixed by the first batch, then enforced on every layer and batch.
     interface_state = {"expected_tokens": None}
 
     chunk_idx = 0
-    global_idx = 0
     current_chunk_data = []
     sample_mapping = []
 
-    model.eval()
     with torch.inference_mode():
         for batch_images, batch_labels in loader:
             batch_size = len(batch_images)
             processed_images = torch.stack([transform(image) for image in batch_images])
 
-            # Flush hook buffer natively in-place
-            storage_dict.clear()
-            _ = model(processed_images)
+            storage_dict.clear()  # the hooks hold a reference to this dict, so clear it in place
+            model(processed_images)
 
-            # Validate rigorous contract (before stride)
-            assert_hook_interface(storage_dict, layer_names, batch_size, interface_state)
+            assert_hook_interface(storage_dict, layer_names, batch_size, interface_state)  # on ALL layers, before the stride
 
             for b in range(batch_size):
                 sample_features = _process_single_sample_features(storage_dict, kept_layer_names, b)
@@ -153,21 +132,18 @@ def extract_features_to_chunks(
 
                 chunk_path = os.path.join(output_dir, f"chunk_{chunk_idx}.pt")
                 sample_mapping.append({
-                    "original_idx": sampled_indices[global_idx],
+                    "original_idx": sampled_indices[len(sample_mapping)],
                     "chunk_path": chunk_path,
                     "index_in_chunk": len(current_chunk_data) - 1
                 })
-
-                global_idx += 1
 
                 if len(current_chunk_data) >= chunk_size:
                     torch.save(current_chunk_data, chunk_path)
                     chunk_idx += 1
                     current_chunk_data = []
 
-        # Flush remainder
+        # The last, partial chunk (chunk_path still names it).
         if current_chunk_data:
-            chunk_path = os.path.join(output_dir, f"chunk_{chunk_idx}.pt")
             torch.save(current_chunk_data, chunk_path)
 
     paths_data = {
@@ -182,8 +158,7 @@ def extract_features_to_chunks(
         "sampled_dataset_indices": sampled_indices,
         "sample_mapping": sample_mapping
     }
-    with open(os.path.join(output_dir, "paths.json"), 'w') as f:
-        json.dump(paths_data, f)
+    (Path(output_dir) / "paths.json").write_text(json.dumps(paths_data))
 
 
 
@@ -193,10 +168,8 @@ def extract_features_to_chunks(
 # -------------------------------------------------------------------------------------------------
 
 class ChunkedFeatureDataset(torch.utils.data.Dataset):
-    def __init__(self, paths_file: str):
-        with open(paths_file, 'r') as f:
-            metadata = json.load(f)
-
+    def __init__(self, paths_file):
+        metadata = json.loads(Path(paths_file).read_text())
         self.sample_mapping = metadata["sample_mapping"]
         self.current_chunk_path = None
         self.current_chunk_data = None
@@ -208,7 +181,7 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
         mapping = self.sample_mapping[idx]
         chunk_path = mapping["chunk_path"]
 
-        # Zero-overhead caching optimized for single-process sequential iteration
+        # One-chunk cache: methods iterate the samples sequentially.
         if self.current_chunk_path != chunk_path:
             self.current_chunk_data = torch.load(chunk_path, weights_only=False)
             self.current_chunk_path = chunk_path
