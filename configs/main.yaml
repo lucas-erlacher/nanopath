@@ -124,13 +124,13 @@ interpret:
     wilds:
       path: /data/thunder-data/wilds
       stratification_dimension: tumor # sample field the sampler balances over
-  methods: [effective_rank]
   extract:
     seed: 42
     num_samples: 1000 # stratified subsample of the dataset
     batch_size: 32
     num_workers: 4 # image decoding only
     chunk_size: 500 # samples per chunk_N.pt file
-    layer_stride: 2 # every n-th layer, counted from the last; ~3 MB/sample for ViT-S
+    layer_stride: 4 # every n-th layer, counted from the last
+  methods: [effective_rank]
   effective_rank:
     singular_value_eps: 1.0e-9
