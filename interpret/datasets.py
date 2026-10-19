@@ -1,4 +1,4 @@
-# interpret/datasets.py: one class per analysis dataset (image + metadata, plus `stratification_values` for the sampler) and load_dataset().
+# interpret/datasets.py: one class per analysis dataset (with `stratification_values` for the sampler) and load_dataset().
 import json
 from pathlib import Path
 from PIL import Image
@@ -6,8 +6,7 @@ import torch
 
 
 class WildsDataset(torch.utils.data.Dataset):
-    # Camelyon17-WILDS tiles from the thunder benchmark manifest (train + val). Metadata fields available as
-    # stratification dimensions: tumor (0/1), patient, node (hospital), split.
+    # Camelyon17-WILDS tiles from the thunder manifest (train + val); stratification dimensions: tumor, patient, node, split.
     def __init__(self, path, stratification_dimension):
         self.root = Path(path)
         manifest = json.loads((Path(__file__).resolve().parent.parent / "benchmarking" / "thunder_v2.json").read_text())
@@ -27,7 +26,7 @@ class WildsDataset(torch.utils.data.Dataset):
         return Image.open(self.root / image).convert("RGB"), {"path": image, **metadata}
 
 
-# Builds the dataset named by `identifier` from its config block ({path, stratification_dimension}).
+# Builds the dataset named by `identifier` from its config block.
 def load_dataset(identifier, dataset_cfg):
     if identifier == "wilds":
         return WildsDataset(dataset_cfg["path"], dataset_cfg["stratification_dimension"])

@@ -1,10 +1,9 @@
-# interpret/effective_rank.py: Track A method; effective rank of the centered GAP and CLS vectors per layer. Method(dataset, method_cfg).run() -> results dict.
+# interpret/effective_rank.py: per-layer effective rank of the centered GAP and CLS vectors.
 from collections import defaultdict
 import torch
 
 
 class EffectiveRank:
-    # dataset: ChunkedFeatureDataset yielding (image, label, layers); method_cfg: the `interpret.effective_rank` YAML block.
     def __init__(self, dataset, method_cfg):
         self.dataset, self.method_cfg = dataset, method_cfg
 
@@ -16,7 +15,7 @@ class EffectiveRank:
 
             for layer_name, groups in layers.items():
                 collected["gap"][layer_name].append(groups["patch"].mean(dim=0))
-                # .clone() because groups["cls"][0] is a view that would keep the whole loaded chunk alive.
+                # clone: a view would keep the whole loaded chunk alive
                 collected["cls"][layer_name].append(groups["cls"][0].clone())
 
         results = {}
