@@ -32,13 +32,14 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
     assert len(layer_names) == len(set(layer_names)), "Duplicate layer keys in returned list."
 
     for layer in layer_names:
-        assert layer in storage_dict, f"Layer '{layer}' missing from hook output."
+        where_layer = f"Layer '{layer}'"
+        assert layer in storage_dict, f"{where_layer} missing from hook output."
         for group_name in REQUIRED_GROUPS:
-            assert group_name in storage_dict[layer], f"Layer '{layer}' missing required group '{group_name}'."
+            assert group_name in storage_dict[layer], f"{where_layer} missing required group '{group_name}'."
         group_dict = {name: storage_dict[layer][name] for name in REQUIRED_GROUPS}  # extra groups are ignored
 
         for group_name, tensor in group_dict.items():
-            where = f"Layer '{layer}' group '{group_name}'"
+            where = f"{where_layer} group '{group_name}'"
             assert tensor.ndim == 3, f"{where} not 3D."
             assert tensor.shape[0] == batch_size, f"{where} batch {tensor.shape[0]} != {batch_size}."
             assert tensor.shape[1] > 0, f"{where} is empty (0 tokens); omit empty groups."
@@ -46,13 +47,13 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
             assert torch.isfinite(tensor).all(), f"{where} contains non-finite values."
 
         patch, cls = group_dict["patch"], group_dict["cls"]
-        assert cls.shape[1] == 1, f"Layer '{layer}' 'cls' group has {cls.shape[1]} tokens, expected exactly 1."
-        assert math.isqrt(patch.shape[1]) ** 2 == patch.shape[1], f"Layer '{layer}' 'patch' length {patch.shape[1]} not a perfect square."
-        assert patch.shape[2] == cls.shape[2], f"Layer '{layer}' hidden dims differ: patch {patch.shape[2]} vs cls {cls.shape[2]}."
+        assert cls.shape[1] == 1, f"{where_layer} 'cls' group has {cls.shape[1]} tokens, expected exactly 1."
+        assert math.isqrt(patch.shape[1]) ** 2 == patch.shape[1], f"{where_layer} 'patch' length {patch.shape[1]} not a perfect square."
+        assert patch.shape[2] == cls.shape[2], f"{where_layer} hidden dims differ: patch {patch.shape[2]} vs cls {cls.shape[2]}."
 
         # Token counts are fixed by the first layer of the first batch and must then match for ALL layers and batches.
-        current_tokens = {name: tensor.shape[1] for name, tensor in group_dict.items()}
-        assert current_tokens == global_state.setdefault("tokens", current_tokens), f"Layer '{layer}' token counts {current_tokens} mismatch global {global_state['tokens']}."
+        tokens = {name: tensor.shape[1] for name, tensor in group_dict.items()}
+        assert tokens == global_state.setdefault("tokens", tokens), f"{where_layer} token counts {tokens} mismatch global {global_state['tokens']}."
 
 
 # Slices one sample out of the batch for the kept layers (devices are main()'s job). copy=True gives each sample
@@ -82,7 +83,8 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
         ranked += [(rank, rng.random(), i) for rank, i in enumerate(members)]
     sampled_indices = [i for _, _, i in sorted(ranked)[:settings["num_samples"]]]
     subset = torch.utils.data.Subset(dataset, sampled_indices)
-    loader = torch.utils.data.DataLoader(subset, batch_size=extract_cfg["batch_size"], shuffle=False, collate_fn=lambda batch: tuple(zip(*batch)))
+    # The workers only decode the images; transform and model run in this process (the transform ends with a CUDA move).
+    loader = torch.utils.data.DataLoader(subset, batch_size=extract_cfg["batch_size"], shuffle=False, num_workers=extract_cfg["num_workers"], collate_fn=lambda batch: tuple(zip(*batch)))
 
     output_dir.mkdir(parents=True)
 
@@ -90,7 +92,6 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
     layer_names = model.register_interpretability_hooks(storage_dict)
     kept_layer_names = layer_names[::-settings["layer_stride"]][::-1]
 
-    # Fixed by the first batch, then enforced on every layer and batch.
     interface_state = {}
 
     chunk_idx = 0
@@ -109,8 +110,10 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
             for b in range(batch_size):
                 sample_features = _process_single_sample_features(storage_dict, kept_layer_names, b)
 
+                # Saved sample format, read back by ChunkedFeatureDataset: image = the model input (clone: a view would
+                # keep the whole batch), label = the dataset's metadata dict, layers = {layer: {group: (T, C) float32}}.
                 datapoint = {
-                    "image": processed_images[b],
+                    "image": processed_images[b].clone(),
                     "label": batch_labels[b],
                     "layers": sample_features
                 }
@@ -210,17 +213,18 @@ def main():
     # Output layout (see README.md): output_dir/<hash of the settings below>/{chunks/, results_<methods>.json}. An existing
     # hash subdirectory is reused as is; if its run died, chunks/metadata.json is missing and loading it below crashes,
     # so delete that subdirectory by hand and rerun.
+    extract_cfg = icfg["extract"]
     settings = {
         "checkpoint_path": icfg["checkpoint_path"], "checkpoint_step": checkpoint["step"], "model_weights": icfg["model_weights"],
-        "dataset": icfg["dataset"], "dataset_config": dataset_cfg, "seed": icfg["seed"],
-        "num_samples": icfg["extract"]["num_samples"], "layer_stride": icfg["extract"]["layer_stride"],
+        "dataset": icfg["dataset"], "dataset_config": dataset_cfg,
+        "seed": extract_cfg["seed"], "num_samples": extract_cfg["num_samples"], "layer_stride": extract_cfg["layer_stride"],
     }
     run_dir = Path(icfg["output_dir"]) / hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:10]
     if run_dir.exists():
         print(f"Reusing extraction in {run_dir}")
     else:
         print(f"Extracting features into {run_dir}...")
-        extract_features_to_chunks(model, dataset, transform, settings, icfg["extract"], run_dir / "chunks")
+        extract_features_to_chunks(model, dataset, transform, settings, extract_cfg, run_dir / "chunks")
 
     # Each method is a class built as Method(data, its YAML sub-block); run() returns a results dict.
     # Track A methods read the saved chunks; a Track B method would be handed the model/loader instead.
