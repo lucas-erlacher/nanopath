@@ -90,17 +90,22 @@ def assert_hook_interface(
         group_dict = storage_dict[layer]
         assert "patch" in group_dict, f"Layer '{layer}' missing 'patch' group."
 
-        current_keys = set(group_dict.keys())
-        if global_state["expected_keys"] is None:
-            global_state["expected_keys"] = current_keys
-        expected_keys = global_state["expected_keys"]
-        assert current_keys == expected_keys, f"Layer '{layer}' keys {current_keys} mismatch global {expected_keys}."
+        # Group names and per-group token counts are fixed by the first layer of the first batch and must
+        # then match for ALL layers and batches.
+        current_tokens = {name: tensor.shape[1] for name, tensor in group_dict.items()}
+        if global_state["expected_tokens"] is None:
+            global_state["expected_tokens"] = current_tokens
+        expected_tokens = global_state["expected_tokens"]
+        assert current_tokens == expected_tokens, f"Layer '{layer}' groups/token counts {current_tokens} mismatch global {expected_tokens}."
 
         layer_expected_dim = None
         for group_name, tensor in group_dict.items():
             assert tensor.ndim == 3, f"Layer '{layer}' group '{group_name}' not 3D."
             batch, tokens, hidden_dim = tensor.shape
             assert batch == batch_size, f"Layer '{layer}' group '{group_name}' batch {batch} != {batch_size}."
+            assert tokens > 0, f"Layer '{layer}' group '{group_name}' is empty (0 tokens); omit empty groups."
+            if group_name == "cls":
+                assert tokens == 1, f"Layer '{layer}' 'cls' group has {tokens} tokens, expected exactly 1."
 
             if layer_expected_dim is None:
                 layer_expected_dim = hidden_dim
@@ -152,8 +157,17 @@ def extract_features_to_chunks(
     # No device moves here: the model arrives on its device and `transform` already outputs tensors on it.
     output_dir, seed = cfg["output_dir"], cfg["seed"]
     chunk_size, layer_stride, on_nonfinite = cfg["preprocess"]["chunk_size"], cfg["preprocess"]["layer_stride"], cfg["preprocess"]["on_nonfinite"]
-    num_available = len(dataset)
-    sampled_indices = random.Random(seed).sample(range(num_available), min(cfg["preprocess"]["num_samples"], num_available))
+    # Sample stratified by tumor vs. healthy (the primary pathology axis; patients/hospitals are left at their natural
+    # frequencies): shuffle each class, rank tiles by their position inside it, then take the lowest ranks first. Every
+    # class contributes equally (a class that runs dry gives up all it has), and the draw is deterministic given the seed.
+    rng, groups = random.Random(seed), {}
+    for i, (_, _, meta) in enumerate(dataset.records):
+        groups.setdefault(meta["tumor"], []).append(i)
+    ranked = []
+    for members in groups.values():
+        rng.shuffle(members)
+        ranked += [(rank, rng.random(), i) for rank, i in enumerate(members)]
+    sampled_indices = [i for _, _, i in sorted(ranked)[:cfg["preprocess"]["num_samples"]]]
     subset = torch.utils.data.Subset(dataset, sampled_indices)
     loader = torch.utils.data.DataLoader(subset, batch_size=cfg["preprocess"]["batch_size"], shuffle=False, collate_fn=lambda batch: tuple(zip(*batch)))
 
@@ -164,7 +178,7 @@ def extract_features_to_chunks(
     kept_layer_names = layer_names[::-layer_stride][::-1]
 
     # State tracking to strictly enforce consistency across ALL layers and ALL batches
-    interface_state = {"expected_keys": None}
+    interface_state = {"expected_tokens": None}
 
     chunk_idx = 0
     global_idx = 0
@@ -217,6 +231,9 @@ def extract_features_to_chunks(
 
     paths_data = {
         "seed": seed,
+        "num_samples": cfg["preprocess"]["num_samples"],
+        "checkpoint_path": cfg["checkpoint_path"],
+        "model_weights": cfg["model_weights"],
         "layer_stride": layer_stride,
         "kept_layers": kept_layer_names,
         "sampled_dataset_indices": sampled_indices,
@@ -329,7 +346,7 @@ def main():
     er_results = run_effective_rank_analysis(dataset, icfg["effective_rank"])
 
     for layer, metrics in er_results.items():
-        cls_str = f", CLS ER: {metrics['cls_effective_rank']:.2f}" if metrics['cls_effective_rank'] else ""
+        cls_str = f", CLS ER: {metrics['cls_effective_rank']:.2f}" if metrics['cls_effective_rank'] is not None else ""
         print(f"[{layer}] GAP ER: {metrics['gap_effective_rank']:.2f}{cls_str}")
 
 if __name__ == "__main__":
