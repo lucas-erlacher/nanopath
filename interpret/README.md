@@ -72,16 +72,18 @@ of the returned list cannot be checked by the rig: they are promises by the impl
 ## Your to-do list to analyse a new model
 
 - [ ] Implement `register_interpretability_hooks` on your model, following the contract above.
-- [ ] If your model is not a Nanopath checkpoint, update `load_model` in `interpret.py` so it builds your model.
+- [ ] If your model is not a Nanopath checkpoint, update `load_model` in `interpret.py` so it loads and builds your model
+  and returns `(model, train_cfg, step)`: `train_cfg` is the config its preprocessing reads (`data.mean`, `data.std`,
+  the probe transform policy) and `step` goes into the cache hash.
 
 Nothing else in the rig needs to change.
 
 ## Extending the rig
 
-- New dataset: a class in `datasets.py` that reads its root from `DATASET_ROOTS` (from `probe.py`, whose loaders are the
-  precedent), returns `(PIL image, metadata dict)` and exposes `records`, a list of `(image, metadata)` per sample (the
-  sampler stratifies over `metadata[stratification_dimension]`); add it to `load_dataset` and a block under `datasets:`
-  in the config.
+- New dataset: a class in `datasets.py` that takes its root folder as an argument (`load_dataset` passes it from
+  `probe.dataset_roots`; `probe.py`'s loaders are the precedent), returns `(PIL image, metadata dict)` and exposes
+  `records`, a list of `(image, metadata)` per sample (the sampler stratifies over `metadata[stratification_dimension]`);
+  add it to `load_dataset` and a block under `datasets:` in the config.
 - New method: a class in its own file, `Method(chunks, method_cfg).run() -> results dict`; add it to the dispatch in `main()`
   and a sub-block (and an entry in `methods`) in the config.
 

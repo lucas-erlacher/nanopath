@@ -12,7 +12,7 @@ from torchvision import transforms
 from pathlib import Path
 
 from model import ViT
-from probe import DATASET_ROOTS, worker_probe_transforms
+from probe import worker_probe_transforms
 from interpret.datasets import load_dataset
 from interpret.effective_rank import EffectiveRank
 
@@ -165,8 +165,8 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
 # MAIN
 # -------------------------------------------------------------------------------------------------
 
-# probe.py's eval transform plus the normalization it applies at its model-call sites; duplicated here because
-# probe.py is locked, so keep the two in sync.
+# probe.py's eval transform plus the normalization it applies at its model-call sites; 
+# duplicated here because probe.py is locked, so keep the two in sync. 
 def evaluation_preprocess(train_cfg):
     transform, _ = worker_probe_transforms(train_cfg)
     mean = torch.tensor(train_cfg["data"]["mean"]).view(3, 1, 1)
@@ -174,11 +174,13 @@ def evaluation_preprocess(train_cfg):
     return transforms.Compose([transform, transforms.Lambda(lambda x: (x - mean) / std)])
 
 
-# Builds the model from a Nanopath checkpoint; to interpret another model, swap this function.
-def load_model(checkpoint, model_weights):
+# Loads a Nanopath checkpoint and returns the model (eval mode, on the CPU), the training config its preprocessing comes
+# from, and its training step (part of the cache hash). To interpret another model, swap this function.
+def load_model(checkpoint_path, model_weights):
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     model = ViT(variant=checkpoint["config"]["model"]["type"])
     model.load_state_dict(checkpoint[{"ema": "model_ema", "model": "model"}[model_weights]], strict=True)
-    return model.eval()
+    return model.eval(), checkpoint["config"], checkpoint["step"]
 
 
 # Everything computes on ONE device (the GPU); main() is the only place that moves tensors or modules between
@@ -190,21 +192,20 @@ def main():
     # Usage (from the repo root): python -m interpret.interpret configs/main.yaml
     cfg = yaml.safe_load(os.path.expandvars(Path(sys.argv[1]).read_text()))
     icfg = cfg["interpret"]
-    checkpoint = torch.load(icfg["checkpoint_path"], map_location="cpu", weights_only=False)
-    model = load_model(checkpoint, icfg["model_weights"]).to(device)
+    model, train_cfg, checkpoint_step = load_model(icfg["checkpoint_path"], icfg["model_weights"])
+    model = model.to(device)
     # The final Lambda puts each image on `device`, so the extractor never moves anything itself.
-    transform = transforms.Compose([evaluation_preprocess(checkpoint["config"]), transforms.Lambda(lambda x: x.to(device))])
+    transform = transforms.Compose([evaluation_preprocess(train_cfg), transforms.Lambda(lambda x: x.to(device))])
     print(f"Loaded checkpoint from {icfg['checkpoint_path']}")
 
-    DATASET_ROOTS.update({k: Path(v) for k, v in cfg["probe"]["dataset_roots"].items()})  # as probe.py does in its worker
     dataset_cfg = icfg["datasets"][icfg["dataset"]]
-    dataset = load_dataset(icfg["dataset"])
+    dataset = load_dataset(icfg["dataset"], cfg["probe"]["dataset_roots"])
 
     # Extractions are cached in output_dir/<hash of settings> (layout in README.md); if a run died, metadata.json is
     # missing and loading crashes below: delete that directory and rerun.
     extract_cfg = icfg["extract"]
     settings = {
-        "checkpoint_path": icfg["checkpoint_path"], "checkpoint_step": checkpoint["step"], "model_weights": icfg["model_weights"],
+        "checkpoint_path": icfg["checkpoint_path"], "checkpoint_step": checkpoint_step, "model_weights": icfg["model_weights"],
         "dataset": icfg["dataset"], "dataset_config": dataset_cfg,
         "seed": extract_cfg["seed"], "num_samples": extract_cfg["num_samples"], "layer_stride": extract_cfg["layer_stride"],
     }
@@ -229,8 +230,12 @@ def main():
         else:
             raise KeyError(f"Unknown method '{name}'; add it to the method dispatch in main() of interpret/interpret.py")
     # The file name lists the methods, so different method subsets don't overwrite each other.
-    (run_dir / f"results_{'_'.join(sorted(icfg['methods']))}.json").write_text(json.dumps(results, indent=2))
-    print(json.dumps(results, indent=2))
+    sorted_method_names = sorted(icfg["methods"])
+    methods_label = "_".join(sorted_method_names)
+    results_path = run_dir / f"results_{methods_label}.json"
+    results_json = json.dumps(results, indent=2)
+    results_path.write_text(results_json)
+    print(results_json)
 
 
 if __name__ == "__main__":
