@@ -51,7 +51,9 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
 
         # Token counts must match across all layers and batches (the first one sets them).
         tokens = {name: tensor.shape[1] for name, tensor in group_dict.items()}
-        assert tokens == global_state.setdefault("tokens", tokens), f"{where_layer} token counts {tokens} mismatch global {global_state['tokens']}."
+        if "tokens" not in global_state:
+            global_state["tokens"] = tokens
+        assert tokens == global_state["tokens"], f"{where_layer} token counts {tokens} mismatch the first layer's {global_state['tokens']}."
 
 
 # Samples tiles (stratified, seeded), runs the model, checks the hook contract and writes chunk_N.pt files plus
@@ -62,16 +64,20 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
     values = [metadata[dimension] for _, metadata in dataset.records]
     sampled_indices = resample(list(range(len(dataset))), n_samples=settings["num_samples"], replace=False, stratify=values, random_state=settings["seed"])
     subset = torch.utils.data.Subset(dataset, sampled_indices)
-    # Workers only decode; the transform ends with a CUDA move, so it runs in this process.
     loader = torch.utils.data.DataLoader(subset, batch_size=extract_cfg["batch_size"], shuffle=False, num_workers=extract_cfg["num_workers"], collate_fn=lambda batch: tuple(zip(*batch)))
 
     output_dir.mkdir(parents=True)
 
     storage_dict = {}
     layer_names = model.register_interpretability_hooks(storage_dict)
-    kept_layer_names = layer_names[::-settings["layer_stride"]][::-1]
+    # Keep every layer_stride-th layer, counting from the last one (so the last is always kept).
+    kept_layer_names = []
+    for steps_from_last, layer in enumerate(reversed(layer_names)):
+        if steps_from_last % settings["layer_stride"] == 0:
+            kept_layer_names.append(layer)
+    kept_layer_names.reverse()  # back to forward-pass order
 
-    interface_state = {}
+    interface_state = {}  # remembers the token counts of the first layer of the first batch, which all later ones must match
 
     chunk_idx = 0
     current_chunk_data = []

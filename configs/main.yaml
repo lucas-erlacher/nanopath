@@ -117,7 +117,7 @@ probe:
 # Interpretability rig, see interpret/README.md
 interpret:
   checkpoint_path: /data/$USER/nanopath/main/default/latest.pt
-  model_weights: ema # ema | model
+  model_weights: ema # [ema, model]
   output_dir: /data/$USER/nanopath/interpret/default
   dataset: pathorob_camelyon
   datasets:
