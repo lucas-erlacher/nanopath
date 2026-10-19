@@ -20,8 +20,8 @@ class EffectiveRank:
                     collected["gap"][layer_name] = []
                     collected["cls"][layer_name] = []
 
-                # .clone() breaks the memory reference, preventing the chunk data tensor from causing an OOM leak in RAM.
-                collected["gap"][layer_name].append(groups["patch"].mean(dim=0).clone())
+                collected["gap"][layer_name].append(groups["patch"].mean(dim=0))
+                # .clone() because groups["cls"][0] is a view that would keep the whole loaded chunk alive.
                 collected["cls"][layer_name].append(groups["cls"][0].clone())
 
         results = {}
@@ -29,7 +29,7 @@ class EffectiveRank:
             layer_results = {}
 
             for representation_name, representations in collected.items():
-                features = torch.stack(representations[layer_name]).float()
+                features = torch.stack(representations[layer_name])
                 features = features - features.mean(dim=0, keepdim=True)
                 sample_count, hidden_dim = features.shape
                 if sample_count > hidden_dim:

@@ -25,9 +25,9 @@ from interpret.effective_rank import EffectiveRank
 REQUIRED_GROUPS = ("patch", "cls")
 
 
+# Validates the hook contract documented in interpret/README.md. Add new checks here whenever a new contract
+# property is identified, and document it there too.
 def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
-    """Validates the hook contract documented in interpret/README.md.
-    Add new checks here whenever a new contract property is identified, and document it there too."""
     assert len(layer_names) == len(set(layer_names)), "Duplicate layer keys in returned list."
 
     for layer in layer_names:
@@ -69,39 +69,41 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
                     f"Layer '{layer}' 'patch' length {tokens} not a perfect square."
                 )
 
+
+# Slices one sample out of the batch for the kept layers (devices are main()'s job). copy=True gives each sample
+# its own storage, since saving a view would serialize the whole batch.
 def _process_single_sample_features(storage_dict, kept_layer_names, batch_idx):
-    """Helper to slice one sample out of the batch for the kept layers (devices are main()'s job).
-    copy=True gives each sample its own storage, since saving a view would serialize the whole batch."""
     return {
         layer: {group: storage_dict[layer][group][batch_idx].to(torch.float32, copy=True) for group in REQUIRED_GROUPS}
         for layer in kept_layer_names
     }
 
+
+# Samples tiles (stratified, seeded), runs the model with its hooks, checks the hook contract, keeps every
+# layer_stride-th layer and writes chunk_N.pt files plus paths.json (last, so it marks a complete run) to output_dir.
+# cfg is the top-level `interpret` config. No device moves here: the model arrives on its device and `transform`
+# already outputs tensors on it.
 def extract_features_to_chunks(model, dataset, transform, cfg, output_dir):
-    # cfg is the top-level `interpret` config; `preprocess` holds the extraction knobs. Chunks and paths.json go to
-    # output_dir (the `chunks/` folder inside main()'s settings-hash subdirectory); paths.json is written last.
-    # No device moves here: the model arrives on its device and `transform` already outputs tensors on it.
-    seed = cfg["seed"]
-    chunk_size, layer_stride = cfg["preprocess"]["chunk_size"], cfg["preprocess"]["layer_stride"]
+    pcfg = cfg["preprocess"]
     # Sample stratified over the dataset's configured stratification dimension (see datasets.py): shuffle the samples
     # of each value, rank them by position inside it, then take the lowest ranks first. Every value contributes
     # equally (one that runs dry gives up all it has), and the draw is deterministic given the seed.
-    rng, groups = random.Random(seed), {}
+    rng, groups = random.Random(cfg["seed"]), {}
     for i, value in enumerate(dataset.stratification_values):
         groups.setdefault(value, []).append(i)
     ranked = []
     for members in groups.values():
         rng.shuffle(members)
         ranked += [(rank, rng.random(), i) for rank, i in enumerate(members)]
-    sampled_indices = [i for _, _, i in sorted(ranked)[:cfg["preprocess"]["num_samples"]]]
+    sampled_indices = [i for _, _, i in sorted(ranked)[:pcfg["num_samples"]]]
     subset = torch.utils.data.Subset(dataset, sampled_indices)
-    loader = torch.utils.data.DataLoader(subset, batch_size=cfg["preprocess"]["batch_size"], shuffle=False, collate_fn=lambda batch: tuple(zip(*batch)))
+    loader = torch.utils.data.DataLoader(subset, batch_size=pcfg["batch_size"], shuffle=False, collate_fn=lambda batch: tuple(zip(*batch)))
 
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir.mkdir(parents=True)
 
     storage_dict = {}
     layer_names = model.register_interpretability_hooks(storage_dict)
-    kept_layer_names = layer_names[::-layer_stride][::-1]
+    kept_layer_names = layer_names[::-pcfg["layer_stride"]][::-1]
 
     # Fixed by the first batch, then enforced on every layer and batch.
     interface_state = {"expected_tokens": None}
@@ -130,14 +132,14 @@ def extract_features_to_chunks(model, dataset, transform, cfg, output_dir):
                 }
                 current_chunk_data.append(datapoint)
 
-                chunk_path = os.path.join(output_dir, f"chunk_{chunk_idx}.pt")
+                chunk_path = output_dir / f"chunk_{chunk_idx}.pt"
                 sample_mapping.append({
                     "original_idx": sampled_indices[len(sample_mapping)],
-                    "chunk_path": chunk_path,
+                    "chunk_path": str(chunk_path),
                     "index_in_chunk": len(current_chunk_data) - 1
                 })
 
-                if len(current_chunk_data) >= chunk_size:
+                if len(current_chunk_data) >= pcfg["chunk_size"]:
                     torch.save(current_chunk_data, chunk_path)
                     chunk_idx += 1
                     current_chunk_data = []
@@ -147,26 +149,26 @@ def extract_features_to_chunks(model, dataset, transform, cfg, output_dir):
             torch.save(current_chunk_data, chunk_path)
 
     paths_data = {
-        "git_commit": subprocess.check_output(["git", "describe", "--always", "--dirty"], cwd=Path(__file__).resolve().parent, text=True).strip(),  # exact code version; -dirty = uncommitted changes
+        # Exact code version that made these chunks; a -dirty suffix means uncommitted changes.
+        "git_commit": subprocess.check_output(["git", "describe", "--always", "--dirty"], cwd=Path(__file__).resolve().parent, text=True).strip(),
         "dataset": cfg["dataset"],
-        "seed": seed,
-        "num_samples": cfg["preprocess"]["num_samples"],
+        "seed": cfg["seed"],
+        "num_samples": pcfg["num_samples"],
         "checkpoint_path": cfg["checkpoint_path"],
         "model_weights": cfg["model_weights"],
-        "layer_stride": layer_stride,
+        "layer_stride": pcfg["layer_stride"],
         "kept_layers": kept_layer_names,
         "sampled_dataset_indices": sampled_indices,
         "sample_mapping": sample_mapping
     }
-    (Path(output_dir) / "paths.json").write_text(json.dumps(paths_data))
-
-
+    (output_dir / "paths.json").write_text(json.dumps(paths_data))
 
 
 # -------------------------------------------------------------------------------------------------
 # DATASET CLASSES
 # -------------------------------------------------------------------------------------------------
 
+# Serves the samples saved by extract_features_to_chunks (found through paths.json) as (image, label, layers).
 class ChunkedFeatureDataset(torch.utils.data.Dataset):
     def __init__(self, paths_file):
         metadata = json.loads(Path(paths_file).read_text())
@@ -190,12 +192,11 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
         return datapoint["image"], datapoint["label"], datapoint["layers"]
 
 
-
-
 # -------------------------------------------------------------------------------------------------
 # MAIN
 # -------------------------------------------------------------------------------------------------
 
+# The model's own eval preprocessing: probe.py's transform plus the normalization it applies at its model-call sites.
 def evaluation_preprocess(cfg):
     transform, _ = worker_probe_transforms(cfg)
     # Normalization is part of probe.py's preprocessing, but it is applied at probe model-call
@@ -205,9 +206,10 @@ def evaluation_preprocess(cfg):
     std = torch.tensor(cfg["data"]["std"]).view(3, 1, 1)
     return transforms.Compose([transform, transforms.Lambda(lambda x: (x - mean) / std)])
 
+
+# Builds the evaluated model from a Nanopath checkpoint dict (same weight-key choice as probe.py).
+# To interpret another model, swap this function; the rig only needs `register_interpretability_hooks`.
 def load_model(checkpoint, model_weights):
-    """Build the evaluated model from a Nanopath checkpoint dict (same weight-key choice as probe.py).
-    To interpret another model, swap this function; the rig only needs `register_interpretability_hooks`."""
     model = ViT(variant=checkpoint["config"]["model"]["type"])
     model.load_state_dict(checkpoint[{"ema": "model_ema", "model": "model"}[model_weights]], strict=True)
     return model.eval()
@@ -217,7 +219,8 @@ def load_model(checkpoint, model_weights):
 # function computes on whatever device its inputs already live on, so there is exactly one place to read
 # to see who is where.
 def main():
-    # Usage (from repo root, so `model`/`probe` import): python -m interpret.interpret configs/main.yaml (expandvars resolves `$USER`, as in train.py).
+    # Usage (from repo root, so `model`/`probe` import): python -m interpret.interpret configs/main.yaml
+    # (expandvars resolves `$USER`, as in train.py).
     cfg = yaml.safe_load(os.path.expandvars(Path(sys.argv[1]).read_text()))
     icfg = cfg["interpret"]
     checkpoint = torch.load(icfg["checkpoint_path"], map_location="cpu", weights_only=False)
@@ -228,14 +231,15 @@ def main():
     print(f"Loaded checkpoint from {icfg['checkpoint_path']}")
 
     # One dataset per run: `dataset` names it, `datasets` holds each identifier's path and stratification dimension.
-    dataset = load_dataset(icfg["dataset"], icfg["datasets"][icfg["dataset"]])
+    dataset_cfg = icfg["datasets"][icfg["dataset"]]
+    dataset = load_dataset(icfg["dataset"], dataset_cfg)
 
     # Layout: output_dir/<hash of everything that determines the chunks>/{chunks/ (chunk_N.pt + paths.json), results_<methods>.json}.
     # An existing hash subdirectory is reused as is; if its run died, paths.json (written last) is missing and loading it
     # below crashes, so delete that subdirectory by hand and rerun.
     settings = {
         "checkpoint_path": icfg["checkpoint_path"], "checkpoint_step": checkpoint["step"], "model_weights": icfg["model_weights"],
-        "dataset": icfg["dataset"], "dataset_config": icfg["datasets"][icfg["dataset"]], "seed": icfg["seed"],
+        "dataset": icfg["dataset"], "dataset_config": dataset_cfg, "seed": icfg["seed"],
         "num_samples": icfg["preprocess"]["num_samples"], "layer_stride": icfg["preprocess"]["layer_stride"],
     }
     run_dir = Path(icfg["output_dir"]) / hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:10]
@@ -243,18 +247,20 @@ def main():
         print(f"Reusing extraction in {run_dir}")
     else:
         print(f"Extracting features into {run_dir}...")
-        extract_features_to_chunks(model, dataset, transform, icfg, str(run_dir / "chunks"))
+        extract_features_to_chunks(model, dataset, transform, icfg, run_dir / "chunks")
 
     # Each method is a class built as Method(data, its YAML sub-block); run() returns a results dict.
     # Track A methods read the saved chunks; a Track B method would be handed the model/loader instead.
-    chunks = ChunkedFeatureDataset(str(run_dir / "chunks" / "paths.json"))
+    chunks = ChunkedFeatureDataset(run_dir / "chunks" / "paths.json")
     results = {}
     for name in icfg["methods"]:
         print(f"Running {name}...")
-        results[name] = {"effective_rank": EffectiveRank}[name](chunks, icfg[name]).run()
+        if name == "effective_rank":
+            results[name] = EffectiveRank(chunks, icfg[name]).run()
     # The file name lists the methods that ran, so runs with different method subsets don't overwrite each other.
     (run_dir / f"results_{'_'.join(sorted(icfg['methods']))}.json").write_text(json.dumps(results, indent=2))
     print(json.dumps(results, indent=2))
+
 
 if __name__ == "__main__":
     main()
