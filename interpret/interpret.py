@@ -69,7 +69,7 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
     # value's samples, rank them within it, take the lowest ranks first. Values contribute equally (one that runs dry gives all it has); seeded.
     dimension = settings["dataset_config"]["stratification_dimension"]
     rng, groups = random.Random(settings["seed"]), {}
-    for i, (_, _, metadata) in enumerate(dataset.records):
+    for i, (_, metadata) in enumerate(dataset.records):
         groups.setdefault(metadata[dimension], []).append(i)
     ranked = []
     for members in groups.values():

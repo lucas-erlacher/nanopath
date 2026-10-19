@@ -69,7 +69,7 @@ Nothing else in the rig needs to change.
 ## Extending the rig
 
 - New dataset: a class in `datasets.py` that reads its root from `DATASET_ROOTS` and its samples from `THUNDER_V2`
-  (both from `probe.py`), returns `(PIL image, metadata dict)` and exposes `records`, a list of `(split, image, metadata)`
+  (both from `probe.py`), returns `(PIL image, metadata dict)` and exposes `records`, a list of `(image, metadata)`
   per sample (the sampler balances over `metadata[stratification_dimension]`); add it to `load_dataset` and a block
   under `datasets:` in the config.
 - New method: a class in its own file, `Method(chunks, method_cfg).run() -> results dict`; add it to the dispatch in `main()`
