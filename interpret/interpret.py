@@ -143,11 +143,12 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
 # DATASET CLASSES
 # -------------------------------------------------------------------------------------------------
 
-# Serves the samples saved by extract_features_to_chunks as (image, label, layers): sample idx is at position
-# idx % chunk_size of chunk_{idx // chunk_size}.pt, so only chunk_size and the sample count are read from metadata.json.
+# Serves the samples saved by extract_features_to_chunks as (image, label, layers), loaded onto `device` (chosen by
+# main()): sample idx is at position idx % chunk_size of chunk_{idx // chunk_size}.pt, so only chunk_size and the
+# sample count are read from metadata.json.
 class ChunkedFeatureDataset(torch.utils.data.Dataset):
-    def __init__(self, chunks_dir):
-        self.chunks_dir = Path(chunks_dir)
+    def __init__(self, chunks_dir, device):
+        self.chunks_dir, self.device = Path(chunks_dir), device
         metadata = json.loads((self.chunks_dir / "metadata.json").read_text())
         self.chunk_size, self.num_samples = metadata["chunk_size"], len(metadata["sampled_dataset_indices"])
         self.current_chunk_idx = None
@@ -161,7 +162,7 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
 
         # One-chunk cache: methods iterate the samples sequentially.
         if self.current_chunk_idx != chunk_idx:
-            self.current_chunk_data = torch.load(self.chunks_dir / f"chunk_{chunk_idx}.pt", weights_only=False)
+            self.current_chunk_data = torch.load(self.chunks_dir / f"chunk_{chunk_idx}.pt", map_location=self.device, weights_only=False)
             self.current_chunk_idx = chunk_idx
 
         datapoint = self.current_chunk_data[position]
@@ -191,19 +192,22 @@ def load_model(checkpoint, model_weights):
     return model.eval()
 
 
-# DEVICE PRINCIPLE: main() is the only place that moves tensors or modules between devices. Every other
-# function computes on whatever device its inputs already live on, so there is exactly one place to read
-# to see who is where.
+# DEVICE PRINCIPLE: all computation (extraction and every analysis method) runs on ONE device, the GPU, set once as
+# `device` at the top of main(). main() is the only place that moves tensors or modules between devices; every other
+# function computes on whatever device its inputs already live on, so there is exactly one place to read who is where.
 def main():
+
+    # ---- SETUP ----
+    device = "cuda"
     # Usage (from repo root, so `model`/`probe` import): python -m interpret.interpret configs/main.yaml
     # (expandvars resolves `$USER`, as in train.py).
     cfg = yaml.safe_load(os.path.expandvars(Path(sys.argv[1]).read_text()))
     icfg = cfg["interpret"]
     checkpoint = torch.load(icfg["checkpoint_path"], map_location="cpu", weights_only=False)
-    model = load_model(checkpoint, icfg["model_weights"]).to("cuda")
+    model = load_model(checkpoint, icfg["model_weights"]).to(device)
     # Eval preprocessing comes from the checkpoint's own training config; the final Lambda puts each
-    # preprocessed image on the GPU so extract_features_to_chunks never has to move anything itself.
-    transform = transforms.Compose([evaluation_preprocess(checkpoint["config"]), transforms.Lambda(lambda x: x.to("cuda"))])
+    # preprocessed image on `device` so extract_features_to_chunks never has to move anything itself.
+    transform = transforms.Compose([evaluation_preprocess(checkpoint["config"]), transforms.Lambda(lambda x: x.to(device))])
     print(f"Loaded checkpoint from {icfg['checkpoint_path']}")
 
     # One dataset per run: `dataset` names it, `datasets` holds each identifier's path and stratification dimension.
@@ -220,6 +224,8 @@ def main():
         "seed": extract_cfg["seed"], "num_samples": extract_cfg["num_samples"], "layer_stride": extract_cfg["layer_stride"],
     }
     run_dir = Path(icfg["output_dir"]) / hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:10]
+    
+    # ---- EXTRACTION ----
     if run_dir.exists():
         print(f"Reusing extraction in {run_dir}")
     else:
@@ -228,7 +234,9 @@ def main():
 
     # Each method is a class built as Method(data, its YAML sub-block); run() returns a results dict.
     # Track A methods read the saved chunks; a Track B method would be handed the model/loader instead.
-    chunks = ChunkedFeatureDataset(run_dir / "chunks")
+    chunks = ChunkedFeatureDataset(run_dir / "chunks", device)  # loaded straight onto `device`, where every method computes
+    
+    # ---- ANALYSIS ----
     results = {}
     for name in icfg["methods"]:
         print(f"Running {name}...")

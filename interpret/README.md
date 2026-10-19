@@ -40,6 +40,8 @@ Disjoint groups, row-major patch order and forward-pass order of the returned li
 
 `python -m interpret.interpret configs/main.yaml` (from the repo root) reads the `interpret:` block of the config: it
 extracts the hooked activations of a seeded, stratified sample of the dataset, then runs the configured `methods`.
+Everything runs on one device, the GPU: `main()` is the only place that moves models or tensors (the loaded chunks go to
+the GPU, so methods compute on GPU tensors).
 
 ```
 output_dir/                      # from the config
