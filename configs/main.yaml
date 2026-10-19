@@ -115,11 +115,11 @@ probe:
     ucla_lung: /data/ucla-lung
 
 # Interpretability rig: `python -m interpret.interpret configs/main.yaml`.
-# Top level = which model/data/where to write; `preprocess` = feature extraction; one sub-block per method.
+# Top level = which model/data/where to write; `extract` = feature extraction; one sub-block per method.
 interpret:
   checkpoint_path: /data/$USER/nanopath/main/default/latest.pt
   model_weights: ema # `ema` or `model`, same meaning as probe.model_weights
-  output_dir: /data/$USER/nanopath/interpret/default # top level; subdirectory <hash of extraction settings>/ holds chunks/ (+ paths.json) and results_<methods>.json
+  output_dir: /data/$USER/nanopath/interpret/default # top level; subdirectory <hash of extraction settings>/ holds chunks/ (+ metadata.json) and results_<methods>.json
   seed: 42
   dataset: wilds # identifier of the dataset used in this run (key of `datasets`; class in interpret/datasets.py)
   datasets: # identifier -> its data path and the sample field the sampler balances over
@@ -127,7 +127,7 @@ interpret:
       path: /data/thunder-data/wilds
       stratification_dimension: tumor
   methods: [effective_rank] # which methods main() runs; each has its own sub-block below and its own file in interpret/
-  preprocess:
+  extract:
     num_samples: 1000 # tiles drawn (seeded), balanced between tumor and healthy tiles from the full dataset
     batch_size: 32
     chunk_size: 500 # samples per chunk_N.pt file

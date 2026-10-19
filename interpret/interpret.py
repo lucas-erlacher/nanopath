@@ -1,3 +1,4 @@
+# interpret/interpret.py: interpretability rig; extracts hooked activations to chunks, then runs the configured methods on them (see README.md).
 import os
 import sys
 import math
@@ -36,38 +37,22 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
             assert group_name in storage_dict[layer], f"Layer '{layer}' missing required group '{group_name}'."
         group_dict = {name: storage_dict[layer][name] for name in REQUIRED_GROUPS}  # extra groups are ignored
 
-        # Token counts of the required groups are fixed by the first layer of the first batch and must
-        # then match for ALL layers and batches.
-        current_tokens = {name: tensor.shape[1] for name, tensor in group_dict.items()}
-        if global_state["expected_tokens"] is None:
-            global_state["expected_tokens"] = current_tokens
-        expected_tokens = global_state["expected_tokens"]
-        assert current_tokens == expected_tokens, f"Layer '{layer}' groups/token counts {current_tokens} mismatch global {expected_tokens}."
-
-        layer_expected_dim = None
         for group_name, tensor in group_dict.items():
-            assert tensor.ndim == 3, f"Layer '{layer}' group '{group_name}' not 3D."
-            batch, tokens, hidden_dim = tensor.shape
-            assert batch == batch_size, f"Layer '{layer}' group '{group_name}' batch {batch} != {batch_size}."
-            assert tokens > 0, f"Layer '{layer}' group '{group_name}' is empty (0 tokens); omit empty groups."
-            if group_name == "cls":
-                assert tokens == 1, f"Layer '{layer}' 'cls' group has {tokens} tokens, expected exactly 1."
+            where = f"Layer '{layer}' group '{group_name}'"
+            assert tensor.ndim == 3, f"{where} not 3D."
+            assert tensor.shape[0] == batch_size, f"{where} batch {tensor.shape[0]} != {batch_size}."
+            assert tensor.shape[1] > 0, f"{where} is empty (0 tokens); omit empty groups."
+            assert not tensor.requires_grad, f"{where} not detached."
+            assert torch.isfinite(tensor).all(), f"{where} contains non-finite values."
 
-            if layer_expected_dim is None:
-                layer_expected_dim = hidden_dim
-            assert hidden_dim == layer_expected_dim, (
-                f"Layer '{layer}' group '{group_name}' dim {hidden_dim} != "
-                f"expected {layer_expected_dim} for this layer."
-            )
+        patch, cls = group_dict["patch"], group_dict["cls"]
+        assert cls.shape[1] == 1, f"Layer '{layer}' 'cls' group has {cls.shape[1]} tokens, expected exactly 1."
+        assert math.isqrt(patch.shape[1]) ** 2 == patch.shape[1], f"Layer '{layer}' 'patch' length {patch.shape[1]} not a perfect square."
+        assert patch.shape[2] == cls.shape[2], f"Layer '{layer}' hidden dims differ: patch {patch.shape[2]} vs cls {cls.shape[2]}."
 
-            assert not tensor.requires_grad, f"Layer '{layer}' group '{group_name}' not detached."
-            assert torch.isfinite(tensor).all(), f"Layer '{layer}' group '{group_name}' contains non-finite values."
-
-            if group_name == "patch":
-                sqrt_tokens = math.isqrt(tokens)
-                assert sqrt_tokens * sqrt_tokens == tokens, (
-                    f"Layer '{layer}' 'patch' length {tokens} not a perfect square."
-                )
+        # Token counts are fixed by the first layer of the first batch and must then match for ALL layers and batches.
+        current_tokens = {name: tensor.shape[1] for name, tensor in group_dict.items()}
+        assert current_tokens == global_state.setdefault("tokens", current_tokens), f"Layer '{layer}' token counts {current_tokens} mismatch global {global_state['tokens']}."
 
 
 # Slices one sample out of the batch for the kept layers (devices are main()'s job). copy=True gives each sample
@@ -79,38 +64,37 @@ def _process_single_sample_features(storage_dict, kept_layer_names, batch_idx):
     }
 
 
-# Samples tiles (stratified, seeded), runs the model with its hooks, checks the hook contract, keeps every
-# layer_stride-th layer and writes chunk_N.pt files plus paths.json (last, so it marks a complete run) to output_dir.
-# cfg is the top-level `interpret` config. No device moves here: the model arrives on its device and `transform`
-# already outputs tensors on it.
-def extract_features_to_chunks(model, dataset, transform, cfg, output_dir):
-    pcfg = cfg["preprocess"]
-    # Sample stratified over the dataset's configured stratification dimension (see datasets.py): shuffle the samples
-    # of each value, rank them by position inside it, then take the lowest ranks first. Every value contributes
-    # equally (one that runs dry gives up all it has), and the draw is deterministic given the seed.
-    rng, groups = random.Random(cfg["seed"]), {}
+# Samples tiles (stratified, seeded), runs the model with its hooks, checks the hook contract, keeps every layer_stride-th
+# layer and writes chunk_N.pt files plus metadata.json (last, so it marks a complete run) to output_dir. `settings` is what
+# determines the chunks (hashed by main(), recorded in metadata.json); `extract_cfg` holds knobs that don't change them.
+# No device moves here: the model arrives on its device and `transform` already outputs tensors on it.
+def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg, output_dir):
+    # Only a limit (num_samples below the dataset size) makes this a real subsample; otherwise every sample is taken.
+    # Stratified over the dataset's configured stratification dimension (see datasets.py): shuffle the samples of each
+    # value, rank them by position inside it, then take the lowest ranks first. Every value contributes equally (one
+    # that runs dry gives up all it has), and the draw is deterministic given the seed.
+    rng, groups = random.Random(settings["seed"]), {}
     for i, value in enumerate(dataset.stratification_values):
         groups.setdefault(value, []).append(i)
     ranked = []
     for members in groups.values():
         rng.shuffle(members)
         ranked += [(rank, rng.random(), i) for rank, i in enumerate(members)]
-    sampled_indices = [i for _, _, i in sorted(ranked)[:pcfg["num_samples"]]]
+    sampled_indices = [i for _, _, i in sorted(ranked)[:settings["num_samples"]]]
     subset = torch.utils.data.Subset(dataset, sampled_indices)
-    loader = torch.utils.data.DataLoader(subset, batch_size=pcfg["batch_size"], shuffle=False, collate_fn=lambda batch: tuple(zip(*batch)))
+    loader = torch.utils.data.DataLoader(subset, batch_size=extract_cfg["batch_size"], shuffle=False, collate_fn=lambda batch: tuple(zip(*batch)))
 
     output_dir.mkdir(parents=True)
 
     storage_dict = {}
     layer_names = model.register_interpretability_hooks(storage_dict)
-    kept_layer_names = layer_names[::-pcfg["layer_stride"]][::-1]
+    kept_layer_names = layer_names[::-settings["layer_stride"]][::-1]
 
     # Fixed by the first batch, then enforced on every layer and batch.
-    interface_state = {"expected_tokens": None}
+    interface_state = {}
 
     chunk_idx = 0
     current_chunk_data = []
-    sample_mapping = []
 
     with torch.inference_mode():
         for batch_images, batch_labels in loader:
@@ -132,63 +116,52 @@ def extract_features_to_chunks(model, dataset, transform, cfg, output_dir):
                 }
                 current_chunk_data.append(datapoint)
 
-                chunk_path = output_dir / f"chunk_{chunk_idx}.pt"
-                sample_mapping.append({
-                    "original_idx": sampled_indices[len(sample_mapping)],
-                    "chunk_path": str(chunk_path),
-                    "index_in_chunk": len(current_chunk_data) - 1
-                })
-
-                if len(current_chunk_data) >= pcfg["chunk_size"]:
-                    torch.save(current_chunk_data, chunk_path)
+                if len(current_chunk_data) == extract_cfg["chunk_size"]:
+                    torch.save(current_chunk_data, output_dir / f"chunk_{chunk_idx}.pt")
                     chunk_idx += 1
                     current_chunk_data = []
 
-        # The last, partial chunk (chunk_path still names it).
+        # The last, partial chunk.
         if current_chunk_data:
-            torch.save(current_chunk_data, chunk_path)
+            torch.save(current_chunk_data, output_dir / f"chunk_{chunk_idx}.pt")
 
-    paths_data = {
+    metadata = {
+        **settings,
         # Exact code version that made these chunks; a -dirty suffix means uncommitted changes.
         "git_commit": subprocess.check_output(["git", "describe", "--always", "--dirty"], cwd=Path(__file__).resolve().parent, text=True).strip(),
-        "dataset": cfg["dataset"],
-        "seed": cfg["seed"],
-        "num_samples": pcfg["num_samples"],
-        "checkpoint_path": cfg["checkpoint_path"],
-        "model_weights": cfg["model_weights"],
-        "layer_stride": pcfg["layer_stride"],
+        "chunk_size": extract_cfg["chunk_size"],
         "kept_layers": kept_layer_names,
         "sampled_dataset_indices": sampled_indices,
-        "sample_mapping": sample_mapping
     }
-    (output_dir / "paths.json").write_text(json.dumps(paths_data))
+    (output_dir / "metadata.json").write_text(json.dumps(metadata))
 
 
 # -------------------------------------------------------------------------------------------------
 # DATASET CLASSES
 # -------------------------------------------------------------------------------------------------
 
-# Serves the samples saved by extract_features_to_chunks (found through paths.json) as (image, label, layers).
+# Serves the samples saved by extract_features_to_chunks as (image, label, layers): sample idx is at position
+# idx % chunk_size of chunk_{idx // chunk_size}.pt, so only chunk_size and the sample count are read from metadata.json.
 class ChunkedFeatureDataset(torch.utils.data.Dataset):
-    def __init__(self, paths_file):
-        metadata = json.loads(Path(paths_file).read_text())
-        self.sample_mapping = metadata["sample_mapping"]
-        self.current_chunk_path = None
+    def __init__(self, chunks_dir):
+        self.chunks_dir = Path(chunks_dir)
+        metadata = json.loads((self.chunks_dir / "metadata.json").read_text())
+        self.chunk_size, self.num_samples = metadata["chunk_size"], len(metadata["sampled_dataset_indices"])
+        self.current_chunk_idx = None
         self.current_chunk_data = None
 
     def __len__(self):
-        return len(self.sample_mapping)
+        return self.num_samples
 
     def __getitem__(self, idx):
-        mapping = self.sample_mapping[idx]
-        chunk_path = mapping["chunk_path"]
+        chunk_idx, position = divmod(idx, self.chunk_size)
 
         # One-chunk cache: methods iterate the samples sequentially.
-        if self.current_chunk_path != chunk_path:
-            self.current_chunk_data = torch.load(chunk_path, weights_only=False)
-            self.current_chunk_path = chunk_path
+        if self.current_chunk_idx != chunk_idx:
+            self.current_chunk_data = torch.load(self.chunks_dir / f"chunk_{chunk_idx}.pt", weights_only=False)
+            self.current_chunk_idx = chunk_idx
 
-        datapoint = self.current_chunk_data[mapping["index_in_chunk"]]
+        datapoint = self.current_chunk_data[position]
         return datapoint["image"], datapoint["label"], datapoint["layers"]
 
 
@@ -197,13 +170,13 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
 # -------------------------------------------------------------------------------------------------
 
 # The model's own eval preprocessing: probe.py's transform plus the normalization it applies at its model-call sites.
-def evaluation_preprocess(cfg):
-    transform, _ = worker_probe_transforms(cfg)
+def evaluation_preprocess(train_cfg):
+    transform, _ = worker_probe_transforms(train_cfg)
     # Normalization is part of probe.py's preprocessing, but it is applied at probe model-call
     # sites rather than inside worker_probe_transforms(). Since probe.py must not be edited, we
     # reimplement it here. Regularly compare the pipelines to prevent drift (e.g. with an agent).
-    mean = torch.tensor(cfg["data"]["mean"]).view(3, 1, 1)
-    std = torch.tensor(cfg["data"]["std"]).view(3, 1, 1)
+    mean = torch.tensor(train_cfg["data"]["mean"]).view(3, 1, 1)
+    std = torch.tensor(train_cfg["data"]["std"]).view(3, 1, 1)
     return transforms.Compose([transform, transforms.Lambda(lambda x: (x - mean) / std)])
 
 
@@ -234,24 +207,24 @@ def main():
     dataset_cfg = icfg["datasets"][icfg["dataset"]]
     dataset = load_dataset(icfg["dataset"], dataset_cfg)
 
-    # Layout: output_dir/<hash of everything that determines the chunks>/{chunks/ (chunk_N.pt + paths.json), results_<methods>.json}.
-    # An existing hash subdirectory is reused as is; if its run died, paths.json (written last) is missing and loading it
-    # below crashes, so delete that subdirectory by hand and rerun.
+    # Output layout (see README.md): output_dir/<hash of the settings below>/{chunks/, results_<methods>.json}. An existing
+    # hash subdirectory is reused as is; if its run died, chunks/metadata.json is missing and loading it below crashes,
+    # so delete that subdirectory by hand and rerun.
     settings = {
         "checkpoint_path": icfg["checkpoint_path"], "checkpoint_step": checkpoint["step"], "model_weights": icfg["model_weights"],
         "dataset": icfg["dataset"], "dataset_config": dataset_cfg, "seed": icfg["seed"],
-        "num_samples": icfg["preprocess"]["num_samples"], "layer_stride": icfg["preprocess"]["layer_stride"],
+        "num_samples": icfg["extract"]["num_samples"], "layer_stride": icfg["extract"]["layer_stride"],
     }
     run_dir = Path(icfg["output_dir"]) / hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:10]
     if run_dir.exists():
         print(f"Reusing extraction in {run_dir}")
     else:
         print(f"Extracting features into {run_dir}...")
-        extract_features_to_chunks(model, dataset, transform, icfg, run_dir / "chunks")
+        extract_features_to_chunks(model, dataset, transform, settings, icfg["extract"], run_dir / "chunks")
 
     # Each method is a class built as Method(data, its YAML sub-block); run() returns a results dict.
     # Track A methods read the saved chunks; a Track B method would be handed the model/loader instead.
-    chunks = ChunkedFeatureDataset(run_dir / "chunks" / "paths.json")
+    chunks = ChunkedFeatureDataset(run_dir / "chunks")
     results = {}
     for name in icfg["methods"]:
         print(f"Running {name}...")

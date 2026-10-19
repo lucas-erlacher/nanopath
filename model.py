@@ -176,23 +176,17 @@ class ViT(nn.Module):
     def register_interpretability_hooks(self, storage_dict):
         # Interpretability hooks: returns ordered layer keys and fills storage_dict with named token groups per
         # layer. The full contract every model must follow is in interpret/README.md.
-        layer_names = []
-
         def make_hook(name):
             def hook(module, inputs, output):
-                storage_dict[name] = {
-                    "patch": output[:, 1 + self.registers :].detach(),
-                    "cls": output[:, :1].detach(),
-                    "register": output[:, 1 : 1 + self.registers].detach(),
-                }
+                storage_dict[name] = {"patch": output[:, 1 + self.registers :].detach(), "cls": output[:, :1].detach()}
 
             return hook
 
         # Every block output, then the final norm last: it is the representation the probes consume.
-        for name, module in [*((f"block_{i}", block) for i, block in enumerate(self.blocks)), ("norm", self.norm)]:
+        modules = {f"block_{i}": block for i, block in enumerate(self.blocks)} | {"norm": self.norm}
+        for name, module in modules.items():
             module.register_forward_hook(make_hook(name))
-            layer_names.append(name)
-        return layer_names
+        return list(modules)
 
     # Default probe contract: encode_image returns patches for segmentation
     # and probe_features returns CLS for pooled probes. Recipes may override either method

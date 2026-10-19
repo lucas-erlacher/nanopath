@@ -1,7 +1,4 @@
-# interpret/datasets.py: one class per supported analysis dataset, plus load_dataset() which main() calls.
-# Contract: Dataset(path, stratification_dimension) is a torch Dataset whose __getitem__ returns (PIL RGB image,
-# metadata dict) and which exposes `stratification_values`, one hashable value per sample taken from the metadata
-# field named by the stratification dimension. The sampler in interpret.py draws equally from every value.
+# interpret/datasets.py: one class per analysis dataset (image + metadata, plus `stratification_values` for the sampler) and load_dataset().
 import json
 from pathlib import Path
 from PIL import Image
@@ -19,18 +16,18 @@ class WildsDataset(torch.utils.data.Dataset):
             spec = manifest["classification"]["wilds"][split]
             for image, target in zip(spec["images"], spec["labels"]):
                 patient = next(part for part in Path(image).parts if part.startswith("patient_"))
-                self.records.append((split, image, {"tumor": int(target), "patient": patient, "node": patient.rsplit("_", 1)[-1]}))
-        self.stratification_values = [{"split": split, **meta}[stratification_dimension] for split, _, meta in self.records]
+                self.records.append((image, {"split": split, "tumor": int(target), "patient": patient, "node": patient.rsplit("_", 1)[-1]}))
+        self.stratification_values = [metadata[stratification_dimension] for _, metadata in self.records]
 
     def __len__(self):
         return len(self.records)
 
     def __getitem__(self, index):
-        split, image, metadata = self.records[index]
-        return Image.open(self.root / image).convert("RGB"), {"split": split, "path": image, **metadata}
+        image, metadata = self.records[index]
+        return Image.open(self.root / image).convert("RGB"), {"path": image, **metadata}
 
 
 # Builds the dataset named by `identifier` from its config block ({path, stratification_dimension}).
-def load_dataset(identifier, cfg):
+def load_dataset(identifier, dataset_cfg):
     if identifier == "wilds":
-        return WildsDataset(cfg["path"], cfg["stratification_dimension"])
+        return WildsDataset(dataset_cfg["path"], dataset_cfg["stratification_dimension"])

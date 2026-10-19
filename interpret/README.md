@@ -36,6 +36,21 @@ milestone the representation your downstream heads consume.
 
 Disjoint groups, row-major patch order and forward-pass order of the returned list are promises by the implementer.
 
+## Running the rig and its output
+
+`python -m interpret.interpret configs/main.yaml` (from the repo root) reads the `interpret:` block of the config: it
+extracts the hooked activations of a seeded, stratified sample of the dataset, then runs the configured `methods`.
+
+```
+output_dir/                      # from the config
+  <hash>/                        # hash of everything that determines the chunks (checkpoint + step, weights, dataset, seed, num_samples, layer_stride)
+    chunks/                      # chunk_N.pt files + metadata.json (settings, git commit, sampled dataset indices); metadata.json is written last
+    results_<methods>.json       # one per set of methods that ran, e.g. results_effective_rank.json
+```
+
+An existing `<hash>/` directory is reused without re-extracting. If a run died, its `chunks/metadata.json` is missing and
+loading crashes: delete that `<hash>/` directory and rerun.
+
 ## Your to-do list to analyse a new model
 
 - [ ] Implement `register_interpretability_hooks` on your model, following the contract above.
