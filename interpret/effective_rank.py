@@ -5,7 +5,8 @@ import torch
 
 class EffectiveRank:
     def __init__(self, dataset, method_cfg):
-        self.dataset, self.method_cfg = dataset, method_cfg
+        self.dataset = dataset
+        self.method_cfg = method_cfg
 
     def run(self):
         collected = {"gap": defaultdict(list), "cls": defaultdict(list)}

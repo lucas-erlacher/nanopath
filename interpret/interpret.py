@@ -44,7 +44,8 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
             assert not tensor.requires_grad, f"{where} not detached."
             assert torch.isfinite(tensor).all(), f"{where} contains non-finite values."
 
-        patch, cls = group_dict["patch"], group_dict["cls"]
+        patch = group_dict["patch"]
+        cls = group_dict["cls"]
         assert cls.shape[1] == 1, f"{where_layer} 'cls' group has {cls.shape[1]} tokens, expected exactly 1."
         assert math.isqrt(patch.shape[1]) ** 2 == patch.shape[1], f"{where_layer} 'patch' length {patch.shape[1]} not a perfect square."
         assert patch.shape[2] == cls.shape[2], f"{where_layer} hidden dims differ: patch {patch.shape[2]} vs cls {cls.shape[2]}."
@@ -136,9 +137,11 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
 # Serves saved samples as (image, label, layers) on `device`: sample idx is at idx % chunk_size of chunk_{idx // chunk_size}.pt.
 class ChunkedFeatureDataset(torch.utils.data.Dataset):
     def __init__(self, chunks_dir, device):
-        self.chunks_dir, self.device = Path(chunks_dir), device
+        self.chunks_dir = Path(chunks_dir)
+        self.device = device
         metadata = json.loads((self.chunks_dir / "metadata.json").read_text())
-        self.chunk_size, self.num_samples = metadata["chunk_size"], len(metadata["sampled_dataset_indices"])
+        self.chunk_size = metadata["chunk_size"]
+        self.num_samples = len(metadata["sampled_dataset_indices"])
         self.current_chunk_idx = None
         self.current_chunk_data = None
 
@@ -146,7 +149,8 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
-        chunk_idx, position = divmod(idx, self.chunk_size)
+        chunk_idx = idx // self.chunk_size
+        position = idx % self.chunk_size
 
         # One-chunk cache: methods iterate the samples sequentially.
         if self.current_chunk_idx != chunk_idx:
