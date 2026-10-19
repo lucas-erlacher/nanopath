@@ -79,50 +79,50 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
 
     interface_state = {}  # remembers the token counts of the first layer of the first batch, which all later ones must match
 
-    # A chunk is a whole number of batches (so no batch straddles two chunks); the last chunk may hold fewer samples.
-    samples_per_chunk = math.ceil(extract_cfg["chunk_size"] / extract_cfg["batch_size"]) * extract_cfg["batch_size"]
     chunk_idx = 0
-    chunk_filled = 0
+    current_chunk_data = []
 
     with torch.inference_mode():
-        for batch_images, batch_metadata in loader:
-            num_images = len(batch_images)
+        for batch_images, batch_labels in loader:
+            batch_size = len(batch_images)
             processed_images = torch.stack([transform(image) for image in batch_images])
 
             storage_dict.clear()  # the hooks hold this dict, so clear it in place
             model(processed_images)
 
-            assert_hook_interface(storage_dict, layer_names, num_images, interface_state)  # before the stride
+            assert_hook_interface(storage_dict, layer_names, batch_size, interface_state)  # before the stride
 
-            # First batch of a chunk: allocate its tensors at their final size (their shapes are known only after a forward pass).
-            # Chunk format (read by ChunkedFeatureDataset): images (N, 3, H, W), metadata (N dicts), layers {layer: {group: (N, T, C)}}.
-            if chunk_filled == 0:
-                chunk_len = min(samples_per_chunk, len(sampled_indices) - chunk_idx * samples_per_chunk)
-                chunk = {"images": torch.empty((chunk_len, *processed_images.shape[1:]), dtype=torch.float32, device=processed_images.device), "metadata": [], "layers": {}}
+            for b in range(batch_size):
+                # One sample's kept layers; copy=True because saving a view would serialize the whole batch.
+                sample_features = {}
                 for layer in kept_layer_names:
-                    chunk["layers"][layer] = {}
+                    sample_features[layer] = {}
                     for group in REQUIRED_GROUPS:
-                        chunk["layers"][layer][group] = torch.empty((chunk_len, *storage_dict[layer][group].shape[1:]), dtype=torch.float32, device=processed_images.device)
+                        sample_features[layer][group] = storage_dict[layer][group][b, :, :].to(torch.float32, copy=True)
 
-            # Fill this batch's slots (assigning into float32 tensors converts the dtype).
-            batch_slots = slice(chunk_filled, chunk_filled + num_images)
-            chunk["images"][batch_slots, :, :, :] = processed_images
-            chunk["metadata"].extend(batch_metadata)
-            for layer in kept_layer_names:
-                for group in REQUIRED_GROUPS:
-                    chunk["layers"][layer][group][batch_slots, :, :] = storage_dict[layer][group]
-            chunk_filled += num_images
+                # Sample format (read by ChunkedFeatureDataset): image, label = dataset metadata, layers {layer: {group: (T, C)}};
+                # the image is cloned because a view would keep the whole batch alive.
+                datapoint = {
+                    "image": processed_images[b, :, :, :].clone(),
+                    "label": batch_labels[b],
+                    "layers": sample_features
+                }
+                current_chunk_data.append(datapoint)
 
-            if chunk_filled == chunk_len:
-                torch.save(chunk, output_dir / f"chunk_{chunk_idx}.pt")
-                chunk_idx += 1
-                chunk_filled = 0
+                if len(current_chunk_data) == extract_cfg["chunk_size"]:
+                    torch.save(current_chunk_data, output_dir / f"chunk_{chunk_idx}.pt")
+                    chunk_idx += 1
+                    current_chunk_data = []
+
+        # The last, partial chunk.
+        if current_chunk_data:
+            torch.save(current_chunk_data, output_dir / f"chunk_{chunk_idx}.pt")
 
     metadata = {
         **settings,
         # Exact code version; -dirty means uncommitted changes.
         "git_commit": subprocess.check_output(["git", "describe", "--always", "--dirty"], cwd=Path(__file__).resolve().parent, text=True).strip(),
-        "samples_per_chunk": samples_per_chunk,
+        "chunk_size": extract_cfg["chunk_size"],
         "kept_layers": kept_layer_names,
         "sampled_dataset_indices": sampled_indices,
     }
@@ -133,32 +133,28 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
 # DATASET CLASSES
 # -------------------------------------------------------------------------------------------------
 
-# Serves saved samples as (image, metadata, layers) on `device`: sample idx is at idx % samples_per_chunk of chunk_{idx // samples_per_chunk}.pt.
+# Serves saved samples as (image, label, layers) on `device`: sample idx is at idx % chunk_size of chunk_{idx // chunk_size}.pt.
 class ChunkedFeatureDataset(torch.utils.data.Dataset):
     def __init__(self, chunks_dir, device):
         self.chunks_dir, self.device = Path(chunks_dir), device
         metadata = json.loads((self.chunks_dir / "metadata.json").read_text())
-        self.samples_per_chunk, self.num_samples = metadata["samples_per_chunk"], len(metadata["sampled_dataset_indices"])
+        self.chunk_size, self.num_samples = metadata["chunk_size"], len(metadata["sampled_dataset_indices"])
         self.current_chunk_idx = None
-        self.current_chunk = None
+        self.current_chunk_data = None
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        chunk_idx, position = divmod(idx, self.samples_per_chunk)
+        chunk_idx, position = divmod(idx, self.chunk_size)
 
         # One-chunk cache: methods iterate the samples sequentially.
         if self.current_chunk_idx != chunk_idx:
-            self.current_chunk = torch.load(self.chunks_dir / f"chunk_{chunk_idx}.pt", map_location=self.device, weights_only=False)
+            self.current_chunk_data = torch.load(self.chunks_dir / f"chunk_{chunk_idx}.pt", map_location=self.device, weights_only=False)
             self.current_chunk_idx = chunk_idx
 
-        layers = {}
-        for layer, groups in self.current_chunk["layers"].items():
-            layers[layer] = {}
-            for group, tensor in groups.items():
-                layers[layer][group] = tensor[position, :, :]  # (T, C)
-        return self.current_chunk["images"][position, :, :, :], self.current_chunk["metadata"][position], layers
+        datapoint = self.current_chunk_data[position]
+        return datapoint["image"], datapoint["label"], datapoint["layers"]
 
 
 # -------------------------------------------------------------------------------------------------
