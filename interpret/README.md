@@ -3,14 +3,18 @@
 `python -m interpret.interpret configs/main.yaml` (from the repo root) reads the `interpret:` block of the config: it
 extracts the hooked activations of a seeded, stratified sample of a dataset into chunk files, then runs the configured
 `methods` on them and saves their results. Everything runs on one device, the GPU: `main()` is the only place that
-moves models or tensors (the loaded chunks go to the GPU, so methods compute on GPU tensors).
+moves models or tensors (the loaded chunks go to the GPU, so methods compute on GPU tensors). A run needs a GPU, a
+Nanopath checkpoint (it carries its training `config`, its `step` and the `model_ema`/`model` weights) and
+`probe.dataset_roots` pointing at the data.
 
 ## Config (`interpret:` in `configs/main.yaml`)
 
 - `checkpoint_path`, `model_weights` (`ema` | `model`, as `probe.model_weights`): the model to analyse.
-- `dataset` + `datasets.<id>.stratification_dimension`: one dataset per run (classes in `datasets.py`); its data root
-  is `probe.dataset_roots.<id>`. The sampler balances over the stratification dimension, which only matters when
-  `num_samples` is below the dataset size.
+- `dataset` + `datasets.<id>.stratification_dimension`: one dataset per run (classes in `datasets.py`). Available:
+  `pathorob_camelyon` (PathoROB Camelyon tiles, root `probe.dataset_roots.pathorob`), with the metadata fields
+  `biological_class`, `medical_center` and `slide_id` to stratify by. The sampler is sklearn's `resample` with
+  `replace=False` and `stratify=`: a seeded subsample that keeps the proportions of the stratification dimension.
+  `num_samples` must not exceed the dataset size.
 - `extract.{seed, num_samples, batch_size, num_workers, chunk_size, layer_stride}`: `layer_stride` keeps every n-th
   layer counted from the last (the last is always kept); `num_workers` only parallelizes image decoding.
 - `methods` + one sub-block per method (e.g. `effective_rank`).
@@ -29,6 +33,12 @@ output_dir/                      # from the config
 
 An existing `<hash>/` directory is reused without re-extracting. If a run died, its `chunks/metadata.json` is missing and
 loading crashes: delete that `<hash>/` directory and rerun.
+
+## Methods
+
+- `effective_rank`: per layer, the effective rank (exp of the entropy of the normalized singular values) of the centered
+  GAP (mean patch token) and CLS vectors over all samples; `singular_value_eps` drops numerically zero singular values.
+  Result: `{layer: {"gap_effective_rank": ..., "cls_effective_rank": ...}}`.
 
 ## Hook contract
 
@@ -70,7 +80,7 @@ Nothing else in the rig needs to change.
 
 - New dataset: a class in `datasets.py` that reads its root from `DATASET_ROOTS` (from `probe.py`, whose loaders are the
   precedent), returns `(PIL image, metadata dict)` and exposes `records`, a list of `(image, metadata)` per sample (the
-  sampler balances over `metadata[stratification_dimension]`); add it to `load_dataset` and a block under `datasets:`
+  sampler stratifies over `metadata[stratification_dimension]`); add it to `load_dataset` and a block under `datasets:`
   in the config.
 - New method: a class in its own file, `Method(chunks, method_cfg).run() -> results dict`; add it to the dispatch in `main()`
   and a sub-block (and an entry in `methods`) in the config.

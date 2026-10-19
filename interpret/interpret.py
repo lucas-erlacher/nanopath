@@ -5,9 +5,9 @@ import math
 import json
 import hashlib
 import subprocess
-import random
 import yaml
 import torch
+from sklearn.utils import resample
 from torchvision import transforms
 from pathlib import Path
 
@@ -54,28 +54,13 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
         assert tokens == global_state.setdefault("tokens", tokens), f"{where_layer} token counts {tokens} mismatch global {global_state['tokens']}."
 
 
-# Slices one sample out of the batch; copy=True because saving a view would serialize the whole batch.
-def _process_single_sample_features(storage_dict, kept_layer_names, batch_idx):
-    return {
-        layer: {group: storage_dict[layer][group][batch_idx, :, :].to(torch.float32, copy=True) for group in REQUIRED_GROUPS}
-        for layer in kept_layer_names
-    }
-
-
 # Samples tiles (stratified, seeded), runs the model, checks the hook contract and writes chunk_N.pt files plus
 # metadata.json (last, so it marks a complete run). `settings` determines the chunks (hashed in main, saved in metadata.json).
 def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg, output_dir):
-    # Stratified draw over the dataset's stratification dimension (a metadata field in dataset.records): shuffle each
-    # value's samples, rank them within it, take the lowest ranks first. Values contribute equally (one that runs dry gives all it has); seeded.
+    # Seeded subsample that keeps the proportions of the dataset's stratification dimension (a metadata field).
     dimension = settings["dataset_config"]["stratification_dimension"]
-    rng, groups = random.Random(settings["seed"]), {}
-    for i, (_, metadata) in enumerate(dataset.records):
-        groups.setdefault(metadata[dimension], []).append(i)
-    ranked = []
-    for members in groups.values():
-        rng.shuffle(members)
-        ranked += [(rank, rng.random(), i) for rank, i in enumerate(members)]
-    sampled_indices = [i for _, _, i in sorted(ranked)[:settings["num_samples"]]]
+    values = [metadata[dimension] for _, metadata in dataset.records]
+    sampled_indices = resample(list(range(len(dataset))), n_samples=settings["num_samples"], replace=False, stratify=values, random_state=settings["seed"])
     subset = torch.utils.data.Subset(dataset, sampled_indices)
     # Workers only decode; the transform ends with a CUDA move, so it runs in this process.
     loader = torch.utils.data.DataLoader(subset, batch_size=extract_cfg["batch_size"], shuffle=False, num_workers=extract_cfg["num_workers"], collate_fn=lambda batch: tuple(zip(*batch)))
@@ -102,7 +87,12 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
             assert_hook_interface(storage_dict, layer_names, batch_size, interface_state)  # before the stride
 
             for b in range(batch_size):
-                sample_features = _process_single_sample_features(storage_dict, kept_layer_names, b)
+                # One sample's kept layers; copy=True because saving a view would serialize the whole batch.
+                sample_features = {}
+                for layer in kept_layer_names:
+                    sample_features[layer] = {}
+                    for group in REQUIRED_GROUPS:
+                        sample_features[layer][group] = storage_dict[layer][group][b, :, :].to(torch.float32, copy=True)
 
                 # Sample format (read by ChunkedFeatureDataset): image, label = dataset metadata, layers {layer: {group: (T, C)}};
                 # the image is cloned because a view would keep the whole batch alive.
