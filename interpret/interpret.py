@@ -179,7 +179,7 @@ def evaluation_preprocess(train_cfg):
 def load_model(checkpoint_path, model_weights):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     model = ViT(variant=checkpoint["config"]["model"]["type"])
-    model.load_state_dict(checkpoint[{"ema": "model_ema", "model": "model"}[model_weights]], strict=True)
+    model.load_state_dict(checkpoint[model_weights], strict=True)
     return model.eval(), checkpoint["config"], checkpoint["step"]
 
 
@@ -218,7 +218,6 @@ def main():
         print(f"Extracting features into {run_dir}...")
         extract_features_to_chunks(model, dataset, transform, settings, extract_cfg, run_dir / "chunks")
 
-    # Each method is Method(chunks, its config block).run() -> results dict.
     chunks = ChunkedFeatureDataset(run_dir / "chunks", device)
     
     # ---- ANALYSIS ----

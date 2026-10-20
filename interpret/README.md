@@ -9,7 +9,7 @@ Nanopath checkpoint (it carries its training `config`, its `step` and the `model
 
 ## Config (`interpret:` in `configs/main.yaml`)
 
-- `checkpoint_path`, `model_weights` (`ema` | `model`, as `probe.model_weights`): the model to analyse.
+- `checkpoint_path`, `model_weights` (the checkpoint key: `model_ema` for the teacher, `model` for the student): the model to analyse.
 - `dataset` + `datasets.<id>.stratification_dimension`: one dataset per run (classes in `datasets.py`). Available:
   `pathorob_camelyon` (PathoROB Camelyon tiles, root `probe.dataset_roots.pathorob`), with the metadata fields
   `biological_class`, `medical_center` and `slide_id` to stratify by. The sampler is sklearn's `resample` with
@@ -30,6 +30,10 @@ output_dir/                      # from the config
     chunks/                      # chunk_N.pt files + metadata.json (settings, git commit, chunk size, kept layers, sampled dataset indices); metadata.json is written last
     results_<methods>.json       # one per set of methods that ran, e.g. results_effective_rank.json
 ```
+
+Each `chunk_N.pt` is a list of `chunk_size` samples (the last chunk may hold fewer), each a dict `{"image": (3, H, W)
+model input, "label": the dataset's metadata dict, "layers": {layer: {"patch": (N, C), "cls": (1, C)}}}`, all tensors
+float32. Methods read them through `ChunkedFeatureDataset`, which returns `(image, label, layers)` for one sample on the GPU.
 
 An existing `<hash>/` directory is reused without re-extracting. If a run died, its `chunks/metadata.json` is missing and
 loading crashes: delete that `<hash>/` directory and rerun.
