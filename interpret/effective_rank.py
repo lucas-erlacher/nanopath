@@ -12,6 +12,7 @@
 
 from matplotlib.figure import Figure
 import torch
+from tqdm import tqdm
 
 
 class EffectiveRank:
@@ -24,7 +25,7 @@ class EffectiveRank:
         collected = {"patch_mean": {}, "cls": {}}
 
         # per layer, collect across all datapoints the CLS tokens and mean of patch tokens: collected[token type][layer] = list of num_datapoints many vectors.
-        for i in range(len(self.chunked_dataset)):
+        for i in tqdm(range(len(self.chunked_dataset)), desc="Collecting"):
             _, _, layers = self.chunked_dataset[i]
 
             for layer_name, groups in layers.items():
@@ -34,12 +35,14 @@ class EffectiveRank:
                 collected["patch_mean"][layer_name].append(groups["patch"].mean(dim=0))  # mean over patch tokens
                 collected["cls"][layer_name].append(groups["cls"][0, :])  # the CLS group is (1, C), indexing out 0-th position makes it a plain C-vector
 
+        print(f"Collected {len(self.chunked_dataset)} samples for {len(collected['cls'])} layers, computing effective ranks")
+
         # One effective rank value per (vector type, layer): results[vector type][layer]
         results = {}
         for vector_type, vectors_by_layer in collected.items():  # iterate over vector types (patch_mean, cls)
             results[vector_type] = {}
 
-            for layer_name, vectors in vectors_by_layer.items():  # iterate over layers, first to last
+            for layer_name, vectors in tqdm(vectors_by_layer.items(), desc=f"Effective rank ({vector_type})"):  # iterate over layers, first to last
                 features = torch.stack(vectors)
                 # NOTE:
                 # center the embedding cloud - without it a strong offset of the whole cloud from the origin gives one very large singular value, 
@@ -53,6 +56,7 @@ class EffectiveRank:
                 results[vector_type][layer_name] = torch.exp(entropy).item()
 
         self.results = results
+        print("Effective rank done")
 
     # One line plot per representation: effective rank per layer. self.results is in forward-pass order, so the x axis
     # runs from the first to the last layer. Returns {file name: figure}; main() saves them.
