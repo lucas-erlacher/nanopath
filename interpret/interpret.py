@@ -15,6 +15,9 @@ from pathlib import Path
 from model import ViT
 from probe import worker_probe_transforms
 from interpret.datasets import load_dataset
+
+# Headless plotting (figures are only saved to files): Colab exports MPLBACKEND=<notebook backend>, which is not installed in the venv.
+os.environ["MPLBACKEND"] = "agg"
 from interpret.effective_rank import EffectiveRank
 
 
