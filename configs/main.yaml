@@ -131,5 +131,4 @@ interpret:
     chunk_size: 500 # samples per chunk_N.pt file
     layer_stride: 4 # every n-th layer, counted from the last
   methods: [effective_rank]
-  effective_rank:
-    singular_value_eps: 1.0e-9
+  effective_rank: {} # no parameters

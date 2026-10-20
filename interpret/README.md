@@ -33,7 +33,7 @@ output_dir/                      # from the config
   results/
     <hash>_<methods>/            # one folder per extraction and set of methods, e.g. 8707bab631_effective_rank
       results.json               # the results of all methods
-      <method>/                  # the plots that method defines, e.g. effective_rank/gap_effective_rank.png
+      <method>/                  # the plots that method defines, e.g. effective_rank/patch_mean_effective_rank.png
 ```
 
 Each `chunk_N.pt` is a list of `chunk_size` samples (the last chunk may hold fewer), each a dict `{"image": (3, H, W)
@@ -46,9 +46,9 @@ loading crashes: delete that `data/<hash>/` directory and rerun.
 ## Methods
 
 - `effective_rank`: per layer, the effective rank (exp of the entropy of the normalized singular values) of the centered
-  GAP (mean patch token) and CLS vectors over all samples; `singular_value_eps` drops numerically zero singular values.
-  Result: `{layer: {"gap_effective_rank": ..., "cls_effective_rank": ...}}`. Plots: `gap_effective_rank.png` and
-  `cls_effective_rank.png`, effective rank against the layers from first to last.
+  mean-over-the-patch-tokens and CLS vectors over all samples; no threshold or epsilon (zero singular values count as 0·log 0 = 0).
+  Result: `{"patch_mean": {layer: effective rank}, "cls": {layer: effective rank}}`. Plots: `patch_mean_effective_rank.png`
+  and `cls_effective_rank.png`, effective rank against the layers from first to last.
 
 ## Hook contract
 
