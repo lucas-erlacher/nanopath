@@ -65,7 +65,11 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
     values = [metadata[dimension] for _, metadata in dataset.records]
     sampled_indices = resample(list(range(len(dataset))), n_samples=settings["num_samples"], replace=False, stratify=values, random_state=settings["seed"])
     subset = torch.utils.data.Subset(dataset, sampled_indices)
-    loader = torch.utils.data.DataLoader(subset, batch_size=extract_cfg["batch_size"], shuffle=False, num_workers=extract_cfg["num_workers"], collate_fn=lambda batch: tuple(zip(*batch)))
+    # "fork" as in probe.py: Python 3.14 defaults to "forkserver", which pickles the dataset and the collate lambda to every worker.
+    loader = torch.utils.data.DataLoader(
+        subset, batch_size=extract_cfg["batch_size"], shuffle=False, num_workers=extract_cfg["num_workers"],
+        multiprocessing_context="fork", collate_fn=lambda batch: tuple(zip(*batch)),
+    )
 
     output_dir.mkdir(parents=True)
 
