@@ -140,10 +140,10 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
 
 # Serves saved samples as (image, metadata, layers) on `device`: sample idx is at idx % chunk_size of chunk_{idx // chunk_size}.pt.
 class ChunkedFeatureDataset(torch.utils.data.Dataset):
-    def __init__(self, chunks_dir, device):
-        self.chunks_dir = Path(chunks_dir)
+    def __init__(self, data_dir, device):
+        self.data_dir = Path(data_dir)
         self.device = device
-        metadata = json.loads((self.chunks_dir / "metadata.json").read_text())
+        metadata = json.loads((self.data_dir / "metadata.json").read_text())
         self.chunk_size = metadata["chunk_size"]
         self.num_samples = len(metadata["sampled_dataset_indices"])
         self.current_chunk_idx = None
@@ -158,7 +158,7 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
 
         # One-chunk cache: methods iterate the samples sequentially.
         if self.current_chunk_idx != chunk_idx:
-            self.current_chunk_samples = torch.load(self.chunks_dir / f"chunk_{chunk_idx}.pt", map_location=self.device, weights_only=False)
+            self.current_chunk_samples = torch.load(self.data_dir / f"chunk_{chunk_idx}.pt", map_location=self.device, weights_only=False)
             self.current_chunk_idx = chunk_idx
 
         sample = self.current_chunk_samples[position]
@@ -205,7 +205,7 @@ def main():
     dataset_cfg = icfg["datasets"][icfg["dataset"]]
     dataset = load_dataset(icfg["dataset"], cfg["probe"]["dataset_roots"])
 
-    # Extractions are cached in output_dir/<hash of settings> (layout in README.md); if a run died, metadata.json is
+    # Extractions are cached in output_dir/data/<hash of settings> (layout in README.md); if a run died, metadata.json is
     # missing and loading crashes below: delete that directory and rerun.
     extract_cfg = icfg["extract"]
     settings = {
@@ -213,16 +213,17 @@ def main():
         "dataset": icfg["dataset"], "dataset_config": dataset_cfg,
         "seed": extract_cfg["seed"], "num_samples": extract_cfg["num_samples"], "layer_stride": extract_cfg["layer_stride"],
     }
-    run_dir = Path(icfg["output_dir"]) / hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:10]
-    
-    # ---- EXTRACTION ----
-    if run_dir.exists():
-        print(f"Reusing extraction in {run_dir}")
-    else:
-        print(f"Extracting features into {run_dir}...")
-        extract_features_to_chunks(model, dataset, transform, settings, extract_cfg, run_dir / "chunks")
+    settings_hash = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:10]
+    data_dir = Path(icfg["output_dir"]) / "data" / settings_hash
 
-    chunked_dataset = ChunkedFeatureDataset(run_dir / "chunks", device)
+    # ---- EXTRACTION ----
+    if data_dir.exists():
+        print(f"Reusing extraction in {data_dir}")
+    else:
+        print(f"Extracting features into {data_dir}...")
+        extract_features_to_chunks(model, dataset, transform, settings, extract_cfg, data_dir)
+
+    chunked_dataset = ChunkedFeatureDataset(data_dir, device)
     
     # ---- ANALYSIS ----
     results = {}
@@ -232,10 +233,12 @@ def main():
             results[name] = EffectiveRank(chunked_dataset, icfg[name]).run()
         else:
             raise KeyError(f"Unknown method '{name}'; add it to the method dispatch in main() of interpret/interpret.py")
-    # The file name lists the methods, so different method subsets don't overwrite each other.
+    # The file name has the extraction's hash and the methods, so other extractions or method subsets don't overwrite it.
     sorted_method_names = sorted(icfg["methods"])
     methods_label = "_".join(sorted_method_names)
-    results_path = run_dir / f"results_{methods_label}.json"
+    results_dir = Path(icfg["output_dir"]) / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    results_path = results_dir / f"{settings_hash}_{methods_label}.json"
     results_json = json.dumps(results, indent=2)
     results_path.write_text(results_json)
     print(results_json)

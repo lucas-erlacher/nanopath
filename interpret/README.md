@@ -26,17 +26,20 @@ that is about 3.4 MB at stride 2 and 2.2 MB at stride 4, so a 500-sample chunk i
 
 ```
 output_dir/                      # from the config
-  <hash>/                        # hash of everything that determines the chunks (checkpoint + step, weights, dataset + its config, seed, num_samples, layer_stride)
-    chunks/                      # chunk_N.pt files + metadata.json (settings, git commit, chunk size, kept layers, sampled dataset indices); metadata.json is written last
-    results_<methods>.json       # one per set of methods that ran, e.g. results_effective_rank.json
+  data/
+    <hash>/                      # hash of everything that determines the chunks (checkpoint + step, weights, dataset + its config, seed, num_samples, layer_stride)
+      chunk_N.pt                 # the extracted samples
+      metadata.json              # settings, git commit, chunk size, kept layers, sampled dataset indices; written last
+  results/
+    <hash>_<methods>.json        # one per extraction and set of methods, e.g. 8707bab631_effective_rank.json
 ```
 
 Each `chunk_N.pt` is a list of `chunk_size` samples (the last chunk may hold fewer), each a dict `{"image": (3, H, W)
 model input, "metadata": the dataset's metadata dict, "layers": {layer: {"patch": (N, C), "cls": (1, C)}}}`, all tensors
 float32. Methods read them through `ChunkedFeatureDataset`, which returns `(image, metadata, layers)` for one sample on the GPU.
 
-An existing `<hash>/` directory is reused without re-extracting. If a run died, its `chunks/metadata.json` is missing and
-loading crashes: delete that `<hash>/` directory and rerun.
+An existing `data/<hash>/` directory is reused without re-extracting. If a run died, its `metadata.json` is missing and
+loading crashes: delete that `data/<hash>/` directory and rerun.
 
 ## Methods
 
