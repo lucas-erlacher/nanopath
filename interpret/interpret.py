@@ -9,6 +9,7 @@ import yaml
 import torch
 from sklearn.utils import resample
 from torchvision import transforms
+from tqdm import tqdm
 from pathlib import Path
 
 from model import ViT
@@ -88,7 +89,7 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
     chunk_samples = []
 
     with torch.inference_mode():
-        for batch_images, batch_metadata in loader:
+        for batch_images, batch_metadata in tqdm(loader, desc="Extracting"):
             batch_size = len(batch_images)
             processed_images = torch.stack([transform(image) for image in batch_images])
 
