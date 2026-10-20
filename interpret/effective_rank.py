@@ -1,5 +1,7 @@
 # interpret/effective_rank.py: per-layer effective rank of the centered mean-over-patch-tokens and CLS vectors.
-# relevant papers: https://infoscience.epfl.ch/record/110188 (introduced the definition), https://arxiv.org/abs/2210.02885 (applied it to modern SSL models)
+# relevant papers: 
+# - https://infoscience.epfl.ch/record/110188 (introduced the ER definition)
+# - https://arxiv.org/abs/2210.02885 (applied it in the context of modern SSL)
 
 # NOTE:
 # rank of embeddings collected for a certain layer across datapoints tells us "how many of its dimensions is this layer actually occupying".
@@ -7,7 +9,7 @@
 # (analogously it will very rarely be the case that a singular value of the embedding matrix will be exactly zero) 
 # i.e. rank of a real world embedding matrix will almost always be full even if some dimensions are very close to being unused. 
 # effective rank aims to be more robust: it normalizes singular values to a probability distribution and then computes it's exponentiated entropy 
-# (how uncertain are we about a draw from this distribution) i.e. if one singular value dominates (even if the others are non-zero) entropy is close to 0 
+# (how uncertain are we about a draw from this distribution) i.e. if one singular value dominates (even if the others are non-zero) entropy is close to 0 (low uncertainty)
 # (ER=1, rank would have been full unless the other sing vals are exactly 0) - if sing vals are approx. uniformly distributed entropy is close to log(k) (ER=k). 
 
 from matplotlib.figure import Figure
