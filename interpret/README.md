@@ -2,10 +2,10 @@
 
 `python -m interpret.interpret configs/main.yaml` (from the repo root) reads the `interpret:` block of the config: it
 extracts the hooked activations of a seeded, stratified sample of a dataset into chunk files, then runs the configured
-`methods` on them and saves their results. Everything runs on one device, the GPU: `main()` is the only place that
-moves models or tensors (the loaded chunks go to the GPU, so methods compute on GPU tensors). A run needs a GPU, a
-Nanopath checkpoint (it carries its training `config`, its `step` and the `model_ema`/`model` weights) and
-`probe.dataset_roots` pointing at the data.
+`methods` on them and saves their results and plots. Everything runs on one device, the GPU: `main()` is the only place
+that moves models or tensors (the loaded chunks go to the GPU, so methods compute on GPU tensors). A run needs a GPU, a
+Nanopath checkpoint (it carries its training `config`, its `step` and the `model_ema`/`model` weights),
+and `probe.dataset_roots` pointing at the data.
 
 ## Config (`interpret:` in `configs/main.yaml`)
 
@@ -31,7 +31,9 @@ output_dir/                      # from the config
       chunk_N.pt                 # the extracted samples
       metadata.json              # settings, git commit, chunk size, kept layers, sampled dataset indices; written last
   results/
-    <hash>_<methods>.json        # one per extraction and set of methods, e.g. 8707bab631_effective_rank.json
+    <hash>_<methods>/            # one folder per extraction and set of methods, e.g. 8707bab631_effective_rank
+      results.json               # the results of all methods
+      <method>/                  # the plots that method defines, e.g. effective_rank/gap_effective_rank.png
 ```
 
 Each `chunk_N.pt` is a list of `chunk_size` samples (the last chunk may hold fewer), each a dict `{"image": (3, H, W)
@@ -45,7 +47,8 @@ loading crashes: delete that `data/<hash>/` directory and rerun.
 
 - `effective_rank`: per layer, the effective rank (exp of the entropy of the normalized singular values) of the centered
   GAP (mean patch token) and CLS vectors over all samples; `singular_value_eps` drops numerically zero singular values.
-  Result: `{layer: {"gap_effective_rank": ..., "cls_effective_rank": ...}}`.
+  Result: `{layer: {"gap_effective_rank": ..., "cls_effective_rank": ...}}`. Plots: `gap_effective_rank.png` and
+  `cls_effective_rank.png`, effective rank against the layers from first to last.
 
 ## Hook contract
 
@@ -91,8 +94,9 @@ Nothing else in the rig needs to change.
   `probe.dataset_roots`; `probe.py`'s loaders are the precedent), returns `(PIL image, metadata dict)` and exposes
   `records`, a list of `(image, metadata)` per sample (the sampler stratifies over `metadata[stratification_dimension]`);
   add it to `load_dataset` and a block under `datasets:` in the config.
-- New method: a class in its own file, `Method(chunked_dataset, method_cfg).run() -> results dict`; add it to the dispatch in `main()`
-  and a sub-block (and an entry in `methods`) in the config.
+- New method: a class in its own file, `Method(chunked_dataset, method_cfg)` with `run()`, which stores a nested dict of
+  plain numbers in `self.results`, and `plot()`, which returns `{file name: matplotlib Figure}` built from `self.results`
+  (`main()` saves the figures); add it to the dispatch in `main()` and a sub-block (and an entry in `methods`) in the config.
 
 ## Notes
 

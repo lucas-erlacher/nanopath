@@ -1,5 +1,6 @@
 # interpret/effective_rank.py: per-layer effective rank of the centered GAP and CLS vectors.
 from collections import defaultdict
+from matplotlib.figure import Figure
 import torch
 
 
@@ -7,6 +8,7 @@ class EffectiveRank:
     def __init__(self, chunked_dataset, method_cfg):
         self.chunked_dataset = chunked_dataset
         self.method_cfg = method_cfg
+        self.results = None  # {layer: {metric: float}}, set by run()
 
     def run(self):
         collected = {"gap": defaultdict(list), "cls": defaultdict(list)}
@@ -39,4 +41,22 @@ class EffectiveRank:
 
             results[layer_name] = layer_results
 
-        return results
+        self.results = results
+
+    # One line plot per representation: effective rank per layer. self.results is in forward-pass order, so the x axis
+    # runs from the first to the last layer. Returns {file name: figure}; main() saves them.
+    def plot(self):
+        layer_names = list(self.results)
+        figures = {}
+        for representation_name, title in (("gap", "mean patch token (GAP)"), ("cls", "CLS token")):
+            ranks = []
+            for layer_name in layer_names:
+                ranks.append(self.results[layer_name][f"{representation_name}_effective_rank"])
+            figure = Figure()
+            axis = figure.subplots()
+            axis.plot(layer_names, ranks, marker="o")
+            axis.set_xlabel("layer (increasing depth)")
+            axis.set_ylabel("effective rank")
+            axis.set_title(f"Effective rank of the {title} per layer")
+            figures[f"{representation_name}_effective_rank"] = figure
+        return figures

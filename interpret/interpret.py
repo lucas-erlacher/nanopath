@@ -227,21 +227,30 @@ def main():
     chunked_dataset = ChunkedFeatureDataset(data_dir, device)
     
     # ---- ANALYSIS ----
+    # One results folder per extraction and set of methods, so other extractions or method subsets don't overwrite it.
+    sorted_method_names = sorted(icfg["methods"])
+    methods_label = "_".join(sorted_method_names)
+    results_dir = Path(icfg["output_dir"]) / "results" / f"{settings_hash}_{methods_label}"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     results = {}
     for name in icfg["methods"]:
         print(f"Running {name}...")
         if name == "effective_rank":
-            results[name] = EffectiveRank(chunked_dataset, icfg[name]).run()
+            method = EffectiveRank(chunked_dataset, icfg[name])
         else:
             raise KeyError(f"Unknown method '{name}'; add it to the method dispatch in main() of interpret/interpret.py")
-    # The file name has the extraction's hash and the methods, so other extractions or method subsets don't overwrite it.
-    sorted_method_names = sorted(icfg["methods"])
-    methods_label = "_".join(sorted_method_names)
-    results_dir = Path(icfg["output_dir"]) / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    results_path = results_dir / f"{settings_hash}_{methods_label}.json"
+        method.run()
+        results[name] = method.results
+
+        # Each method saves the plots it defines into its own subfolder.
+        plot_dir = results_dir / name
+        plot_dir.mkdir(exist_ok=True)
+        for plot_name, figure in method.plot().items():
+            figure.savefig(plot_dir / f"{plot_name}.png", bbox_inches="tight")
+
     results_json = json.dumps(results, indent=2)
-    results_path.write_text(results_json)
+    (results_dir / "results.json").write_text(results_json)
     print(results_json)
 
 
