@@ -81,10 +81,10 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
     interface_state = {}  # remembers the token counts of the first layer of the first batch, which all later ones must match
 
     chunk_idx = 0
-    current_chunk_data = []
+    chunk_samples = []
 
     with torch.inference_mode():
-        for batch_images, batch_labels in loader:
+        for batch_images, batch_metadata in loader:
             batch_size = len(batch_images)
             processed_images = torch.stack([transform(image) for image in batch_images])
 
@@ -95,29 +95,29 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
 
             for b in range(batch_size):
                 # One sample's kept layers; copy=True because saving a view would serialize the whole batch.
-                sample_features = {}
+                sample_layers = {}
                 for layer in kept_layer_names:
-                    sample_features[layer] = {}
+                    sample_layers[layer] = {}
                     for group in REQUIRED_GROUPS:
-                        sample_features[layer][group] = storage_dict[layer][group][b, :, :].to(torch.float32, copy=True)
+                        sample_layers[layer][group] = storage_dict[layer][group][b, :, :].to(torch.float32, copy=True)
 
-                # Sample format (read by ChunkedFeatureDataset): image, label = dataset metadata, layers {layer: {group: (T, C)}};
+                # Sample format (read by ChunkedFeatureDataset): image, metadata (from the dataset), layers {layer: {group: (T, C)}};
                 # the image is cloned because a view would keep the whole batch alive.
-                datapoint = {
+                sample = {
                     "image": processed_images[b, :, :, :].clone(),
-                    "label": batch_labels[b],
-                    "layers": sample_features
+                    "metadata": batch_metadata[b],
+                    "layers": sample_layers
                 }
-                current_chunk_data.append(datapoint)
+                chunk_samples.append(sample)
 
-                if len(current_chunk_data) == extract_cfg["chunk_size"]:
-                    torch.save(current_chunk_data, output_dir / f"chunk_{chunk_idx}.pt")
+                if len(chunk_samples) == extract_cfg["chunk_size"]:
+                    torch.save(chunk_samples, output_dir / f"chunk_{chunk_idx}.pt")
                     chunk_idx += 1
-                    current_chunk_data = []
+                    chunk_samples = []
 
         # The last, partial chunk.
-        if current_chunk_data:
-            torch.save(current_chunk_data, output_dir / f"chunk_{chunk_idx}.pt")
+        if chunk_samples:
+            torch.save(chunk_samples, output_dir / f"chunk_{chunk_idx}.pt")
 
     metadata = {
         **settings,
@@ -134,7 +134,7 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
 # DATASET CLASSES
 # -------------------------------------------------------------------------------------------------
 
-# Serves saved samples as (image, label, layers) on `device`: sample idx is at idx % chunk_size of chunk_{idx // chunk_size}.pt.
+# Serves saved samples as (image, metadata, layers) on `device`: sample idx is at idx % chunk_size of chunk_{idx // chunk_size}.pt.
 class ChunkedFeatureDataset(torch.utils.data.Dataset):
     def __init__(self, chunks_dir, device):
         self.chunks_dir = Path(chunks_dir)
@@ -143,7 +143,7 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
         self.chunk_size = metadata["chunk_size"]
         self.num_samples = len(metadata["sampled_dataset_indices"])
         self.current_chunk_idx = None
-        self.current_chunk_data = None
+        self.current_chunk_samples = None
 
     def __len__(self):
         return self.num_samples
@@ -154,11 +154,11 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
 
         # One-chunk cache: methods iterate the samples sequentially.
         if self.current_chunk_idx != chunk_idx:
-            self.current_chunk_data = torch.load(self.chunks_dir / f"chunk_{chunk_idx}.pt", map_location=self.device, weights_only=False)
+            self.current_chunk_samples = torch.load(self.chunks_dir / f"chunk_{chunk_idx}.pt", map_location=self.device, weights_only=False)
             self.current_chunk_idx = chunk_idx
 
-        datapoint = self.current_chunk_data[position]
-        return datapoint["image"], datapoint["label"], datapoint["layers"]
+        sample = self.current_chunk_samples[position]
+        return sample["image"], sample["metadata"], sample["layers"]
 
 
 # -------------------------------------------------------------------------------------------------
@@ -218,14 +218,14 @@ def main():
         print(f"Extracting features into {run_dir}...")
         extract_features_to_chunks(model, dataset, transform, settings, extract_cfg, run_dir / "chunks")
 
-    chunks = ChunkedFeatureDataset(run_dir / "chunks", device)
+    chunked_dataset = ChunkedFeatureDataset(run_dir / "chunks", device)
     
     # ---- ANALYSIS ----
     results = {}
     for name in icfg["methods"]:
         print(f"Running {name}...")
         if name == "effective_rank":
-            results[name] = EffectiveRank(chunks, icfg[name]).run()
+            results[name] = EffectiveRank(chunked_dataset, icfg[name]).run()
         else:
             raise KeyError(f"Unknown method '{name}'; add it to the method dispatch in main() of interpret/interpret.py")
     # The file name lists the methods, so different method subsets don't overwrite each other.

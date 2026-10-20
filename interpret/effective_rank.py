@@ -4,15 +4,15 @@ import torch
 
 
 class EffectiveRank:
-    def __init__(self, dataset, method_cfg):
-        self.dataset = dataset
+    def __init__(self, chunked_dataset, method_cfg):
+        self.chunked_dataset = chunked_dataset
         self.method_cfg = method_cfg
 
     def run(self):
         collected = {"gap": defaultdict(list), "cls": defaultdict(list)}
 
-        for i in range(len(self.dataset)):
-            _, _, layers = self.dataset[i]
+        for i in range(len(self.chunked_dataset)):
+            _, _, layers = self.chunked_dataset[i]
 
             for layer_name, groups in layers.items():
                 collected["gap"][layer_name].append(groups["patch"].mean(dim=0))

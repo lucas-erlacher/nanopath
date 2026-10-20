@@ -32,8 +32,8 @@ output_dir/                      # from the config
 ```
 
 Each `chunk_N.pt` is a list of `chunk_size` samples (the last chunk may hold fewer), each a dict `{"image": (3, H, W)
-model input, "label": the dataset's metadata dict, "layers": {layer: {"patch": (N, C), "cls": (1, C)}}}`, all tensors
-float32. Methods read them through `ChunkedFeatureDataset`, which returns `(image, label, layers)` for one sample on the GPU.
+model input, "metadata": the dataset's metadata dict, "layers": {layer: {"patch": (N, C), "cls": (1, C)}}}`, all tensors
+float32. Methods read them through `ChunkedFeatureDataset`, which returns `(image, metadata, layers)` for one sample on the GPU.
 
 An existing `<hash>/` directory is reused without re-extracting. If a run died, its `chunks/metadata.json` is missing and
 loading crashes: delete that `<hash>/` directory and rerun.
@@ -88,7 +88,7 @@ Nothing else in the rig needs to change.
   `probe.dataset_roots`; `probe.py`'s loaders are the precedent), returns `(PIL image, metadata dict)` and exposes
   `records`, a list of `(image, metadata)` per sample (the sampler stratifies over `metadata[stratification_dimension]`);
   add it to `load_dataset` and a block under `datasets:` in the config.
-- New method: a class in its own file, `Method(chunks, method_cfg).run() -> results dict`; add it to the dispatch in `main()`
+- New method: a class in its own file, `Method(chunked_dataset, method_cfg).run() -> results dict`; add it to the dispatch in `main()`
   and a sub-block (and an entry in `methods`) in the config.
 
 ## Notes
