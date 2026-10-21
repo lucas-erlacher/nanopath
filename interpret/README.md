@@ -7,6 +7,34 @@ that moves models or tensors (the loaded chunks go to the GPU, so methods comput
 Nanopath checkpoint (it carries its training `config`, its `step` and the `model_ema`/`model` weights),
 and `probe.dataset_roots` pointing at the data.
 
+## Methods
+
+Each method below has its own subsection: the papers behind it, the questions its results can answer and the author's
+notes on the implementation. What a method computes is in its code (`interpret/<method>.py`).
+
+### effective_rank
+
+Papers:
+- [Roy & Vetterli 2007](https://infoscience.epfl.ch/record/110188): introduced the effective rank (ER) definition.
+- [RankMe, Garrido et al. 2022](https://arxiv.org/abs/2210.02885): applied it in the context of modern SSL.
+
+Questions this method answers:
+1. How many of its dimensions does each layer effectively use, and how does that change with depth (separately for the mean-over-patch-tokens and the CLS vector)?
+2. [From the RankMe paper, not yet validated in our context] Is ER a label-free proxy for downstream performance
+   (i.e. we could try to correlate it with our obtained downstream scores in an effort to test the 2022 paper's premise in our context of ViT in DP)?
+
+Notes on the implementation:
+- Rank of embeddings collected for a certain layer across datapoints tells us "how many of its dimensions is this layer actually occupying".
+  It will very rarely be the case that one embedding is an exact linear combination of other collected embeddings (analogously it will very rarely
+  be the case that a singular value of the embedding matrix will be exactly zero), i.e. the rank of a real world embedding matrix will almost always
+  be full even if some dimensions are very close to being unused. Effective rank aims to be more robust: it normalizes singular values to a
+  probability distribution and then computes its exponentiated entropy (how uncertain are we about a draw from this distribution), i.e. if one
+  singular value dominates (even if the others are non-zero) entropy is close to 0 (low uncertainty) (ER=1, rank would have been full unless the
+  other sing vals are exactly 0); if sing vals are approx. uniformly distributed entropy is close to log(k) (ER=k).
+- Centering: the embedding cloud is centered (inspired by PCA, not necessarily the linked papers). Without it a strong offset of the whole cloud
+  from the origin gives one very large singular value, which can dominate the normalized distribution and can push the entropy (and ER) down even
+  if the variation inside the cloud is spread evenly. After centering, the singular values only describe the variation within the cloud.
+
 ## Config (`interpret:` in `configs/main.yaml`)
 
 - `checkpoint_path`, `model_weights` (the checkpoint key: `model_ema` for the teacher, `model` for the student): the model to analyse.
@@ -42,13 +70,6 @@ float32. Methods read them through `ChunkedFeatureDataset`, which returns `(imag
 
 An existing `data/<hash>/` directory is reused without re-extracting. If a run died, its `metadata.json` is missing and
 loading crashes: delete that `data/<hash>/` directory and rerun.
-
-## Methods
-
-- `effective_rank`: per layer, the effective rank (exp of the entropy of the normalized singular values) of the centered
-  mean-over-the-patch-tokens and CLS vectors over all samples; no threshold or epsilon (zero singular values count as 0·log 0 = 0).
-  Result: `{"patch_mean": {layer: effective rank}, "cls": {layer: effective rank}}`. Plots: `patch_mean_effective_rank.png`
-  and `cls_effective_rank.png`, effective rank against the layers from first to last.
 
 ## Hook contract
 
@@ -96,7 +117,8 @@ Nothing else in the rig needs to change.
   add it to `load_dataset` and a block under `datasets:` in the config.
 - New method: a class in its own file, `Method(chunked_dataset, method_cfg)` with `run()`, which stores a nested dict of
   plain numbers in `self.results`, and `plot()`, which returns `{file name: matplotlib Figure}` built from `self.results`
-  (`main()` saves the figures); add it to the dispatch in `main()` and a sub-block (and an entry in `methods`) in the config.
+  (`main()` saves the figures); add it to the dispatch in `main()` and a sub-block (and an entry in `methods`) in the config, and a subsection under
+  Methods here (the papers behind it, the questions it answers, notes on the implementation).
 
 ## Notes
 
