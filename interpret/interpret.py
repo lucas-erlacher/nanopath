@@ -305,6 +305,7 @@ def main():
     results_json = json.dumps(results, indent=2)
     (results_dir / "results.json").write_text(results_json)
     print(results_json)
+    print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
 
 
 if __name__ == "__main__":
