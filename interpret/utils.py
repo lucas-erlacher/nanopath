@@ -12,13 +12,19 @@ import markdown
 # Style of the dashboard: the browser's own light/dark colors, a readable column, plots side by side.
 STYLE = """
 :root { color-scheme: light dark; }
-body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; line-height: 1.55; }
+h1 { margin-bottom: 1rem; }
+h2 { margin: 0 0 1rem; padding-bottom: .5rem; border-bottom: 2px solid #8886; font-size: 1.5rem; }
 table { border-collapse: collapse; }
 th, td { border: 1px solid #8884; padding: .3rem .6rem; text-align: left; vertical-align: top; }
-details { border: 1px solid #8884; border-radius: 6px; padding: .4rem .8rem; margin: .5rem 0; overflow-x: auto; }
+tr:nth-child(even) td { background: #8881; }
+.card { background: #8881; border: 1px solid #8883; border-radius: 12px; padding: 1.2rem 1.5rem; margin: 2.5rem 0; box-shadow: 0 2px 8px #0002; }
+details { border: 1px solid #8884; border-radius: 8px; padding: .4rem .8rem; margin: .6rem 0; overflow-x: auto; }
+details[open] { background: #8881; }
 summary { cursor: pointer; font-weight: 600; }
-.plots { display: flex; flex-wrap: wrap; gap: 1rem; }
-.plots img { max-width: 48%; background: white; }
+summary:hover { opacity: .7; }
+.plots { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
+.plots img { max-width: 48%; background: white; border-radius: 8px; box-shadow: 0 1px 4px #0003; }
 pre { overflow-x: auto; }
 """
 
@@ -42,7 +48,7 @@ def write_dashboard(results_dir, data_dir, cfg):
     body += f"<details><summary>full config</summary><pre>{html.escape(json.dumps(cfg, indent=2))}</pre></details>"
 
     for name in icfg["methods"]:
-        body += f"<h2>{name}</h2><div class='plots'>"
+        body += f"<section class='card'><h2>{name}</h2><div class='plots'>"
         for plot_path in sorted((results_dir / name).glob("*.png")):
             encoded = base64.b64encode(plot_path.read_bytes()).decode()
             body += f"<img src='data:image/png;base64,{encoded}' alt='{plot_path.stem}'>"
@@ -55,6 +61,7 @@ def write_dashboard(results_dir, data_dir, cfg):
                 continue
             title, _, part_body = part.partition(":")
             body += f"<details><summary>{title}</summary>{markdown.markdown(part_body, extensions=['tables'])}</details>"
+        body += "</section>"
 
     page = f"<!doctype html><html><head><meta charset='utf-8'><title>Interpretability run</title><style>{STYLE}</style></head><body>{body}</body></html>"
     (results_dir / "dashboard.html").write_text(page)
