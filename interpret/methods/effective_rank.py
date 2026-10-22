@@ -1,4 +1,4 @@
-# interpret/effective_rank.py: per-layer effective rank of the centered mean-over-patch-tokens and CLS vectors.
+# interpret/methods/effective_rank.py: per-layer effective rank of the centered mean-over-patch-tokens and CLS vectors.
 
 from matplotlib.figure import Figure
 import torch
@@ -26,7 +26,6 @@ class EffectiveRank:
                 results[vector_type][layer_name] = torch.exp(entropy).item()
 
         self.results = results
-        print("Effective rank done")
 
     # One line plot per representation: effective rank per layer. self.results is in forward-pass order, so the x axis
     # runs from the first to the last layer. Returns {file name: figure}; main() saves them.

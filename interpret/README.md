@@ -10,7 +10,7 @@ and `probe.dataset_roots` pointing at the data.
 ## Methods
 
 Each method below has its own subsection: the papers behind it, the questions its results can answer and the author's
-notes on the implementation. What a method computes is in its code (`interpret/<method>.py`).
+notes on the implementation. What a method computes is in its code (`interpret/methods/<method>.py`).
 
 ### effective_rank
 
@@ -96,9 +96,12 @@ output_dir/                      # from the config
   results/
     <hash>_<methods>/            # one folder per extraction and set of methods (sorted by name), e.g. 8707bab631_cka_effective_rank
       results.json               # the results of all methods
+      dashboard.html             # the whole run on one page, to open with a double click (see below)
       config.json                # the full config of the last run that wrote this folder
       <method>/                  # the plots that method defines, e.g. cka/patch_mean_cka.png, effective_rank/patch_mean_effective_rank.png
 ```
+
+At the end of a run, `write_dashboard` (`utils.py`) writes `dashboard.html` into the results folder: the settings of the run, then for every method its plots (embedded in the file, so it can be moved or sent around) and the parts of its subsection of this README (papers, question, what the paper improves on, notes) as toggles. It splits a method's subsection at the lines starting with `Papers`, `Question`, `What the paper improves on` and `Notes on the implementation`.
 
 Each `chunk_N.pt` is a list of `chunk_size` samples (the last chunk may hold fewer), each a dict `{"image": (3, H, W)
 model input, "metadata": the dataset's metadata dict, "layers": {layer: {"patch": (N, C), "cls": (1, C)}}}`, all tensors
@@ -151,7 +154,7 @@ Nothing else in the rig needs to change.
   `probe.dataset_roots`; `probe.py`'s loaders are the precedent), returns `(PIL image, metadata dict)` and exposes
   `records`, a list of `(image, metadata)` per sample (the sampler stratifies over `metadata[stratification_dimension]`);
   add it to `load_dataset` and a block under `datasets:` in the config.
-- New method: a class in its own file, `Method(pooled_vectors)` (or the dataset itself if it needs token-level data) with `run()`, which stores a nested dict of
+- New method: a class in its own file in `interpret/methods/`, `Method(pooled_vectors)` (or the dataset itself if it needs token-level data) with `run()`, which stores a nested dict of
   plain numbers in `self.results`, and `plot()`, which returns `{file name: matplotlib Figure}` built from `self.results`
   (`main()` saves the figures); add it to the dispatch in `main()` and an entry in `methods` in the config (a method with tunables gets its own config sub-block, passed to its constructor in the dispatch), and a subsection under
   Methods here (the papers behind it, the questions it answers, notes on the implementation).

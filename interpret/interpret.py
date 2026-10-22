@@ -17,11 +17,12 @@ from pathlib import Path
 from model import ViT
 from probe import worker_probe_transforms
 from interpret.datasets import load_dataset
+from interpret.utils import write_dashboard
 
 # Headless plotting (figures are only saved to files): Colab exports MPLBACKEND=<notebook backend>, which is not installed in the venv.
 os.environ["MPLBACKEND"] = "agg"
-from interpret.effective_rank import EffectiveRank
-from interpret.cka import CKA
+from interpret.methods.effective_rank import EffectiveRank
+from interpret.methods.cka import CKA
 
 
 # -------------------------------------------------------------------------------------------------
@@ -305,8 +306,9 @@ def main():
     results_json = json.dumps(results, indent=2)
     (results_dir / "results.json").write_text(results_json)
     print(results_json)
-    print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
 
+    write_dashboard(results_dir, data_dir, cfg)
+    print(f"Dashboard: {results_dir / 'dashboard.html'}")
 
 if __name__ == "__main__":
     main()

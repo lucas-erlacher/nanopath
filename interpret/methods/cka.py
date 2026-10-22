@@ -1,4 +1,4 @@
-# interpret/cka.py: linear CKA between all pairs of layers, for the mean-over-patch-tokens and CLS vectors (the steps are in README.md).
+# interpret/methods/cka.py: linear CKA between all pairs of layers, for the mean-over-patch-tokens and CLS vectors (the steps are in README.md).
 # Follows the table in README.md (see "step n" comments) and the paper authors' demo code (google-research/representation_similarity/Demo.ipynb).
 
 from matplotlib.figure import Figure
@@ -59,7 +59,6 @@ class CKA:
                     results[vector_type][layer_a][layer_b] = cka.item()
 
         self.results = results
-        print("CKA done")
 
     # One heatmap per vector type, layers in forward-pass order on both axes. Returns {file name: figure}; main() saves them.
     def plot(self):
