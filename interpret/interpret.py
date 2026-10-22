@@ -2,10 +2,12 @@
 import os
 import sys
 import math
+import random
 import json
 import hashlib
 import subprocess
 import yaml
+import numpy as np
 import torch
 from sklearn.utils import resample
 from torchvision import transforms
@@ -19,6 +21,7 @@ from interpret.datasets import load_dataset
 # Headless plotting (figures are only saved to files): Colab exports MPLBACKEND=<notebook backend>, which is not installed in the venv.
 os.environ["MPLBACKEND"] = "agg"
 from interpret.effective_rank import EffectiveRank
+from interpret.cka import CKA
 
 
 # -------------------------------------------------------------------------------------------------
@@ -169,6 +172,29 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
         return sample["image"], sample["metadata"], sample["layers"]
 
 
+# turns the dataset inside out for the methods: pool_vectors(dataset)[vector type][layer] is an (n, C) matrix with one row per example, for the mean
+# over the patch tokens ("patch_mean") and for the CLS token ("cls"). it reads every chunk, so main() calls it once and passes the result to the methods.
+def pool_vectors(chunked_dataset):
+    collected = {"patch_mean": {}, "cls": {}}  # collected[vector type][layer] = list of n vectors
+
+    for i in tqdm(range(len(chunked_dataset)), desc="Collecting"):
+        _, _, layers = chunked_dataset[i]
+
+        for layer_name, groups in layers.items():
+            if layer_name not in collected["patch_mean"]:
+                collected["patch_mean"][layer_name] = []
+                collected["cls"][layer_name] = []
+            collected["patch_mean"][layer_name].append(groups["patch"].mean(dim=0))  # mean over patch tokens
+            collected["cls"][layer_name].append(groups["cls"][0, :])  # the CLS group is (1, C), indexing out 0-th position makes it a plain C-vector
+
+    pooled_vectors = {}
+    for vector_type, vectors_by_layer in collected.items():
+        pooled_vectors[vector_type] = {}
+        for layer_name, vectors in vectors_by_layer.items():
+            pooled_vectors[vector_type][layer_name] = torch.stack(vectors)
+    return pooled_vectors
+
+
 # -------------------------------------------------------------------------------------------------
 # MAIN
 # -------------------------------------------------------------------------------------------------
@@ -191,12 +217,28 @@ def load_model(checkpoint_path, model_weights):
     return model.eval(), checkpoint["config"], checkpoint["step"]
 
 
+# seeds every random number generator and switches off nondeterministic GPU behaviour, so extractions and results are reproducible (same as the probe
+# job in probe.py, plus numpy, cuDNN and TF32). bitwise equality still needs the same GPU, driver and library versions.
+def set_seeds(seed):
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"  # needed for deterministic cuBLAS matmuls; must be set before the first CUDA operation
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True)  # raises an error if an operation has no deterministic implementation
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False  # benchmark mode picks kernels by timing, which can differ between runs
+    torch.backends.cuda.matmul.allow_tf32 = False  # full float32 matmuls, no TF32 rounding
+    torch.backends.cudnn.allow_tf32 = False
+
+
 # Everything computes on ONE device (the GPU); main() is the only place that moves tensors or modules between
 # devices, every other function computes wherever its inputs already live.
 def main():
 
     # ---- SETUP ----
     device = "cuda"
+    set_seeds(icfg["extract"]["seed"])
     # Usage (from the repo root): python -m interpret.interpret configs/main.yaml
     cfg = yaml.safe_load(os.path.expandvars(Path(sys.argv[1]).read_text()))
     icfg = cfg["interpret"]
@@ -226,6 +268,7 @@ def main():
     else:
         print(f"Extracting features into {data_dir}...")
         extract_features_to_chunks(model, dataset, transform, settings, extract_cfg, data_dir)
+        (data_dir / "config.json").write_text(json.dumps(cfg, indent=2))  # the full config that produced these chunks (a reused extraction keeps its own)
 
     chunked_dataset = ChunkedFeatureDataset(data_dir, device)
     
@@ -235,12 +278,19 @@ def main():
     methods_label = "_".join(sorted_method_names)
     results_dir = Path(icfg["output_dir"]) / "results" / f"{settings_hash}_{methods_label}"
     results_dir.mkdir(parents=True, exist_ok=True)
+    (results_dir / "config.json").write_text(json.dumps(cfg, indent=2))  # the full config of this run
+
+    # pooling away the token dimension (257 tokens into 1 vector per example and layer) makes this  
+    # significantly smaller (> 100x) than the chunks, so materializing this is not a RAM issue. 
+    pooled_vectors = pool_vectors(chunked_dataset)  # computed once, shared by the methods
 
     results = {}
     for name in icfg["methods"]:
         print(f"Running {name}...")
         if name == "effective_rank":
-            method = EffectiveRank(chunked_dataset, icfg[name])
+            method = EffectiveRank(pooled_vectors)
+        elif name == "cka":
+            method = CKA(pooled_vectors, icfg[name])
         else:
             raise KeyError(f"Unknown method '{name}'; add it to the method dispatch in main() of interpret/interpret.py")
         method.run()

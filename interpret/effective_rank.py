@@ -6,34 +6,17 @@ from tqdm import tqdm
 
 
 class EffectiveRank:
-    def __init__(self, chunked_dataset, method_cfg):
-        self.chunked_dataset = chunked_dataset
-        self.method_cfg = method_cfg
+    def __init__(self, pooled_vectors):
+        self.pooled_vectors = pooled_vectors  # {vector type: {layer: (n, C) matrix}}, see pool_vectors in interpret.py
         self.results = None  # {vector type: {layer: effective rank}}, set by run()
 
     def run(self):
-        collected = {"patch_mean": {}, "cls": {}}
-
-        # per layer, collect across all datapoints the CLS tokens and mean of patch tokens: collected[token type][layer] = list of num_datapoints many vectors.
-        for i in tqdm(range(len(self.chunked_dataset)), desc="Collecting"):
-            _, _, layers = self.chunked_dataset[i]
-
-            for layer_name, groups in layers.items():
-                if layer_name not in collected["patch_mean"]:
-                    collected["patch_mean"][layer_name] = []
-                    collected["cls"][layer_name] = []
-                collected["patch_mean"][layer_name].append(groups["patch"].mean(dim=0))  # mean over patch tokens
-                collected["cls"][layer_name].append(groups["cls"][0, :])  # the CLS group is (1, C), indexing out 0-th position makes it a plain C-vector
-
-        print(f"Collected {len(self.chunked_dataset)} samples for {len(collected['cls'])} layers, computing effective ranks")
-
         # One effective rank value per (vector type, layer): results[vector type][layer]
         results = {}
-        for vector_type, vectors_by_layer in collected.items():  # iterate over vector types (patch_mean, cls)
+        for vector_type, features_by_layer in self.pooled_vectors.items():  # iterate over vector types (patch_mean, cls)
             results[vector_type] = {}
 
-            for layer_name, vectors in tqdm(vectors_by_layer.items(), desc=f"Effective rank ({vector_type})"):  # iterate over layers, first to last
-                features = torch.stack(vectors)
+            for layer_name, features in tqdm(features_by_layer.items(), desc=f"Effective rank ({vector_type})"):  # iterate over layers, first to last
                 # center the embedding cloud (PCA-style) so the singular values describe the variation within it, not its offset from the origin
                 features = features - features.mean(dim=0, keepdim=True)
                 singular_values = torch.linalg.svdvals(features)
