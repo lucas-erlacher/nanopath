@@ -8,27 +8,28 @@ from tqdm import tqdm
 
 
 class CKA:
-    def __init__(self, pooled_vectors, seed, method_cfg):
-        self.pooled_vectors = pooled_vectors  # {vector type: {layer: (n, C) matrix}}, see pool_vectors in interpret.py
-        self.seed = seed
-        self.method_cfg = method_cfg  # max_samples: cap on the number of examples
+    def __init__(self, layerwise_pooled_embeddings, seed, method_cfg):
+        self.layerwise_pooled_embeddings = layerwise_pooled_embeddings  # see LayerwisePooledEmbeddings in interpret.py
+
+        # the n x n tables may need more RAM than the data allows, so keep a random subset of at most max_samples examples (label-free, so not exactly stratified).
+        # it is drawn once, so every layer keeps the same examples.
+        # a random subset of k examples from the stratified extraction shifts a class proportion p by at most about sqrt(p(1-p)/k) (an estimate: 0.7 percentage points at k = 5,000
+        # for two balanced classes), so the subset stays close to stratified, especially at large max_samples.
+        permutation = torch.randperm(layerwise_pooled_embeddings.num_examples, generator=torch.Generator().manual_seed(seed))
+        self.sampled_indices = permutation[:method_cfg["max_samples"]].tolist()
         self.results = None  # {vector type: {layer a: {layer b: CKA}}}, set by run()
 
     def run(self):
         results = {}
+        pooled = self.layerwise_pooled_embeddings
 
-        for vector_type, features_by_layer in self.pooled_vectors.items():  # iterate over vector types (patch_mean, cls)
+        for vector_type, records_by_layer in pooled.records.items():  # iterate over vector types (patch_mean, cls)
             flattened_tables = {}  # one n x n table per layer, flattened to a vector, all held at once: max_samples caps the RAM
             squared_lengths = {}
 
             # compute the similarity structure tables for each layer (and perform a precomputation for step 6)
-            for layer_name, features in tqdm(features_by_layer.items(), desc=f"build similarity structure tables ({vector_type})"):  # iterate over layers, first to last
-                # the n x n tables may need more RAM than the data allows, so keep a random subset of at most max_samples examples (label-free, so not exactly stratified). 
-                # the same seed gives the same permutation for the same n, so every layer keeps the same examples.
-                # a random subset of k examples from the stratified extraction shifts a class proportion p by at most about sqrt(p(1-p)/k) (an estimate: 0.7 percentage points at k = 5,000
-                # for two balanced classes), so the subset stays close to stratified, especially at large max_samples.
-                permutation = torch.randperm(features.shape[0], generator=torch.Generator().manual_seed(self.seed))
-                features = features[permutation[:self.method_cfg["max_samples"]], :]
+            for layer_name in tqdm(records_by_layer, desc=f"build similarity structure tables ({vector_type})"):  # iterate over layers, first to last
+                features = pooled.stack(vector_type, layer_name, self.sampled_indices)  # (n, C), one row per sampled example
                 num_examples = features.shape[0]
 
                 # step 4-5 (center features: HX)

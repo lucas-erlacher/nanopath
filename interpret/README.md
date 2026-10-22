@@ -105,7 +105,7 @@ At the end of a run, `write_dashboard` (`utils.py`) writes `dashboard.html` into
 
 Each `chunk_N.pt` is a list of `chunk_size` samples (the last chunk may hold fewer), each a dict `{"image": (3, H, W)
 model input, "metadata": the dataset's metadata dict, "layers": {layer: {"patch": (N, C), "cls": (1, C)}}}`, all tensors
-float32. Methods read them through `ChunkedFeatureDataset`, which returns `(image, metadata, layers)` for one sample on the GPU. `pool_vectors(dataset)` turns it into what the current methods analyse: the mean-over-the-patch-tokens and CLS vector of every example, `{vector type: {layer: (n, C)}}`.
+float32. Methods read them through `ChunkedFeatureDataset`, which returns `(image, metadata, layers)` for one sample on the GPU. `LayerwisePooledEmbeddings(dataset)` turns it into what the current methods analyse: `records[vector type][layer]` is a list with one record per example, `{"embedding": (C,) vector, "metadata": the metadata dict of that example}` (vector types: the mean over the patch tokens and the CLS token). The metadata is a reference to the same dict in every record of an example, never copied or mutated, so an embedding always carries the metadata of its own forward pass; `stack(vector_type, layer, indices)` turns the records at those example indices into an (n, C) matrix.
 
 An existing `data/<hash>/` directory is reused without re-extracting. If a run died, its `metadata.json` is missing and
 loading crashes: delete that `data/<hash>/` directory and rerun.
@@ -154,7 +154,7 @@ Nothing else in the rig needs to change.
   `probe.dataset_roots`; `probe.py`'s loaders are the precedent), returns `(PIL image, metadata dict)` and exposes
   `records`, a list of `(image, metadata)` per sample (the sampler stratifies over `metadata[stratification_dimension]`);
   add it to `load_dataset` and a block under `datasets:` in the config.
-- New method: a class in its own file in `interpret/methods/`, `Method(pooled_vectors)` (or the dataset itself if it needs token-level data) with `run()`, which stores a nested dict of
+- New method: a class in its own file in `interpret/methods/`, `Method(layerwise_pooled_embeddings)` (or the dataset itself if it needs token-level data) with `run()`, which stores a nested dict of
   plain numbers in `self.results`, and `plot()`, which returns `{file name: matplotlib Figure}` built from `self.results`
   (`main()` saves the figures); add it to the dispatch in `main()` and an entry in `methods` in the config (a method with tunables gets its own config sub-block, passed to its constructor in the dispatch), and a subsection under
   Methods here (the papers behind it, the questions it answers, notes on the implementation).

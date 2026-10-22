@@ -173,27 +173,31 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
         return sample["image"], sample["metadata"], sample["layers"]
 
 
-# turns the dataset inside out for the methods: pool_vectors(dataset)[vector type][layer] is an (n, C) matrix with one row per example, for the mean
-# over the patch tokens ("patch_mean") and for the CLS token ("cls"). it reads every chunk, so main() calls it once and passes the result to the methods.
-def pool_vectors(chunked_dataset):
-    collected = {"patch_mean": {}, "cls": {}}  # collected[vector type][layer] = list of n vectors
+# the layer-wise pooled embeddings of all examples: records[vector type][layer] is a list with one record per example, {"embedding": (C,) vector, "metadata": the metadata dict of that
+# example}, for the mean over the patch tokens ("patch_mean") and the CLS token ("cls"). every record of an example points to the same metadata dict (a reference, never copied or
+# mutated), so an embedding always carries the metadata of its own forward pass. built once in main() (it reads every chunk) and shared by the methods; stack() turns the records
+# at the given example indices of one layer into an (n, C) matrix, one row per index.
+class LayerwisePooledEmbeddings:
+    def __init__(self, chunked_dataset):
+        self.num_examples = len(chunked_dataset)
+        self.records = {"patch_mean": {}, "cls": {}}
 
-    for i in tqdm(range(len(chunked_dataset)), desc="Collecting"):
-        _, _, layers = chunked_dataset[i]
+        for i in tqdm(range(self.num_examples), desc="Collecting"):
+            _, metadata, layers = chunked_dataset[i]
 
-        for layer_name, groups in layers.items():
-            if layer_name not in collected["patch_mean"]:
-                collected["patch_mean"][layer_name] = []
-                collected["cls"][layer_name] = []
-            collected["patch_mean"][layer_name].append(groups["patch"].mean(dim=0))  # mean over patch tokens
-            collected["cls"][layer_name].append(groups["cls"][0, :])  # the CLS group is (1, C), indexing out 0-th position makes it a plain C-vector
+            for layer_name, groups in layers.items():
+                if layer_name not in self.records["patch_mean"]:
+                    self.records["patch_mean"][layer_name] = []
+                    self.records["cls"][layer_name] = []
+                # keep these two appends together in one loop iteration: both lists then hold the examples in the same order, which methods rely on (e.g. when combining the two vectors)
+                self.records["patch_mean"][layer_name].append({"embedding": groups["patch"].mean(dim=0), "metadata": metadata})  # mean over patch tokens
+                self.records["cls"][layer_name].append({"embedding": groups["cls"][0, :], "metadata": metadata})  # the CLS group is (1, C), indexing out 0-th position makes it a plain C-vector
 
-    pooled_vectors = {}
-    for vector_type, vectors_by_layer in collected.items():
-        pooled_vectors[vector_type] = {}
-        for layer_name, vectors in vectors_by_layer.items():
-            pooled_vectors[vector_type][layer_name] = torch.stack(vectors)
-    return pooled_vectors
+    def stack(self, vector_type, layer_name, indices):
+        embeddings = []
+        for i in indices:
+            embeddings.append(self.records[vector_type][layer_name][i]["embedding"])
+        return torch.stack(embeddings)
 
 
 # -------------------------------------------------------------------------------------------------
@@ -283,15 +287,15 @@ def main():
 
     # pooling away the token dimension (257 tokens into 1 vector per example and layer) makes this  
     # significantly smaller (> 100x) than the chunks, so materializing this is not a RAM issue. 
-    pooled_vectors = pool_vectors(chunked_dataset)  # computed once, shared by the methods
+    layerwise_pooled_embeddings = LayerwisePooledEmbeddings(chunked_dataset)  # computed once, shared by the methods
 
     results = {}
     for name in icfg["methods"]:
         print(f"Running {name}...")
         if name == "effective_rank":
-            method = EffectiveRank(pooled_vectors)
+            method = EffectiveRank(layerwise_pooled_embeddings)
         elif name == "cka":
-            method = CKA(pooled_vectors, icfg["seed"], icfg[name])
+            method = CKA(layerwise_pooled_embeddings, icfg["seed"], icfg[name])
         else:
             raise KeyError(f"Unknown method '{name}'; add it to the method dispatch in main() of interpret/interpret.py")
         method.run()
@@ -308,7 +312,7 @@ def main():
     print(results_json)
 
     write_dashboard(results_dir, data_dir, cfg)
-    print(f"Dashboard: {results_dir / 'dashboard.html'}")
+    print(f"dashboard saved to: {results_dir / 'dashboard.html'}")
 
 if __name__ == "__main__":
     main()
