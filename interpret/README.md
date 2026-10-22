@@ -75,10 +75,11 @@ Ultimately, the normalized inner product of the centered similarity tables is **
   `pathorob_camelyon` (PathoROB Camelyon tiles, root `probe.dataset_roots.pathorob`), with the metadata fields
   `biological_class`, `medical_center` and `slide_id` to stratify by. The sampler is sklearn's `resample` with
   `replace=False` and `stratify=`: a seeded subsample that keeps the proportions of the stratification dimension.
-  `num_samples` must not exceed the dataset size.
-- `extract.{seed, num_samples, batch_size, num_workers, chunk_size, layer_stride}`: `layer_stride` keeps every n-th
-  layer counted from the last (the last is always kept); `num_workers` only parallelizes image decoding; `seed` seeds the sampler and, via `set_seeds`, every random number generator plus deterministic GPU mode (an operation without a deterministic implementation raises an error).
-- `methods`: the methods to run (`effective_rank`, `cka`); `cka.max_samples` caps the examples CKA uses, because its similarity tables are n × n (0.4 GB each at 10,000 examples, 2.5 GB at 25,000).
+  `num_samples` must be smaller than the dataset size.
+- `seed`: the one seed of the interpret config. It seeds the extraction sampler, CKA's random subset and, via `set_seeds`, every random number generator plus deterministic GPU mode (an operation without a deterministic implementation raises an error).
+- `extract.{num_samples, batch_size, num_workers, chunk_size, layer_stride}`: `layer_stride` keeps every n-th
+  layer counted from the last (the last is always kept); `num_workers` only parallelizes image decoding.
+- `methods`: the methods to run (`effective_rank`, `cka`); `cka.max_samples` caps the examples CKA uses (a seeded random subset, label-free so not exactly stratified), because its similarity tables are n × n (0.1 GB each at 5,000 examples, 0.4 GB at 10,000, 2.5 GB at 25,000); the other methods use all extracted examples.
 
 Storage per sample is `kept_layers x 257 tokens x C x 4 bytes` (float32) plus the 0.6 MB input image; for ViT-S (C=384)
 that is about 3.4 MB at stride 2 and 2.2 MB at stride 4, so a 500-sample chunk is 1.7 GB / 1.1 GB.

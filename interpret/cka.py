@@ -6,9 +6,11 @@ import torch
 from tqdm import tqdm
 
 
+
 class CKA:
-    def __init__(self, pooled_vectors, method_cfg):
+    def __init__(self, pooled_vectors, seed, method_cfg):
         self.pooled_vectors = pooled_vectors  # {vector type: {layer: (n, C) matrix}}, see pool_vectors in interpret.py
+        self.seed = seed
         self.method_cfg = method_cfg  # max_samples: cap on the number of examples
         self.results = None  # {vector type: {layer a: {layer b: CKA}}}, set by run()
 
@@ -19,9 +21,14 @@ class CKA:
             flattened_tables = {}  # one n x n table per layer, flattened to a vector, all held at once: max_samples caps the RAM
             squared_lengths = {}
 
-            # compute the similarity structure tables for each layer (and performa a precomputation for step 6)
+            # compute the similarity structure tables for each layer (and perform a precomputation for step 6)
             for layer_name, features in tqdm(features_by_layer.items(), desc=f"build similarity structure tables ({vector_type})"):  # iterate over layers, first to last
-                features = features[:self.method_cfg["max_samples"], :]  # apply configured sample limit
+                # the n x n tables may need more RAM than the data allows, so keep a random subset of at most max_samples examples (label-free, so not exactly stratified). 
+                # the same seed gives the same permutation for the same n, so every layer keeps the same examples.
+                # a random subset of k examples from the stratified extraction shifts a class proportion p by at most about sqrt(p(1-p)/k) (an estimate: 0.7 percentage points at k = 5,000
+                # for two balanced classes), so the subset stays close to stratified, especially at large max_samples.
+                permutation = torch.randperm(features.shape[0], generator=torch.Generator().manual_seed(self.seed))
+                features = features[permutation[:self.method_cfg["max_samples"]], :]
                 num_examples = features.shape[0]
 
                 # step 4-5 (center features: HX)

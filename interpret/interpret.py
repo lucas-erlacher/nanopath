@@ -238,7 +238,7 @@ def main():
 
     # ---- SETUP ----
     device = "cuda"
-    set_seeds(icfg["extract"]["seed"])
+    set_seeds(icfg["seed"])
     # Usage (from the repo root): python -m interpret.interpret configs/main.yaml
     cfg = yaml.safe_load(os.path.expandvars(Path(sys.argv[1]).read_text()))
     icfg = cfg["interpret"]
@@ -257,7 +257,7 @@ def main():
     settings = {
         "checkpoint_path": icfg["checkpoint_path"], "checkpoint_step": checkpoint_step, "model_weights": icfg["model_weights"],
         "dataset": icfg["dataset"], "dataset_config": dataset_cfg,
-        "seed": extract_cfg["seed"], "num_samples": extract_cfg["num_samples"], "layer_stride": extract_cfg["layer_stride"],
+        "seed": icfg["seed"], "num_samples": extract_cfg["num_samples"], "layer_stride": extract_cfg["layer_stride"],
     }
     settings_hash = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:10]
     data_dir = Path(icfg["output_dir"]) / "data" / settings_hash
@@ -290,7 +290,7 @@ def main():
         if name == "effective_rank":
             method = EffectiveRank(pooled_vectors)
         elif name == "cka":
-            method = CKA(pooled_vectors, icfg[name])
+            method = CKA(pooled_vectors, icfg["seed"], icfg[name])
         else:
             raise KeyError(f"Unknown method '{name}'; add it to the method dispatch in main() of interpret/interpret.py")
         method.run()
