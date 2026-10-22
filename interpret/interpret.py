@@ -238,10 +238,10 @@ def main():
 
     # ---- SETUP ----
     device = "cuda"
-    set_seeds(icfg["seed"])
     # Usage (from the repo root): python -m interpret.interpret configs/main.yaml
     cfg = yaml.safe_load(os.path.expandvars(Path(sys.argv[1]).read_text()))
     icfg = cfg["interpret"]
+    set_seeds(icfg["seed"])  # before the first CUDA operation
     model, train_cfg, checkpoint_step = load_model(icfg["checkpoint_path"], icfg["model_weights"])
     model = model.to(device)
     # The final Lambda puts each image on `device`, so the extractor never moves anything itself.
