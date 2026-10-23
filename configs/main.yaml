@@ -136,7 +136,7 @@ interpret:
     targets: [biological_class, medical_center]  
     lrs: [1.0e-3, 1.0e-4, 1.0e-5]  
     weight_decays: [0.0, 1.0e-3, 1.0e-4,]  
-    epochs: 200
+    epochs: 10
     batch_size: 512
     leakage_group: slide_id  # metadata field whose values are never split across train and validation 
     folds: 4 
