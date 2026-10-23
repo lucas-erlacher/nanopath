@@ -71,11 +71,11 @@ class LinearProbe:
 
     # Trains one linear head on the training subset and returns its metrics on the validation subset after the final epoch and its per-epoch train and validation loss.
     # The validation loss is a diagnostic only. Both subsets are prepared and standardized in the same way (with the training statistics mean and std, see run()).
-    def fit(self, target, train_subset, val_subset, mean, std, class_weights, lr, weight_decay):
+    def fit(self, target, dataset, train_indices, val_indices, mean, std, class_weights, lr, weight_decay):
         torch.manual_seed(self.seed)  # reseeded for every (fold, grid point), so a training does not depend on the loop order
         generator = torch.Generator().manual_seed(self.seed)
-        train_loader = torch.utils.data.DataLoader(train_subset, batch_size=self._cfg["batch_size"], shuffle=True, generator=generator)  # the training examples in a new random order every epoch
-        val_loader = torch.utils.data.DataLoader(val_subset, batch_size=self._cfg["batch_size"])
+        train_loader = dataset.loader(train_indices, self._cfg["batch_size"], shuffle=True, generator=generator)  # the training examples in a new random order every epoch, batches already on the device
+        val_loader = dataset.loader(val_indices, self._cfg["batch_size"])
 
         # create probing layer
         num_classes = len(class_weights)
@@ -128,7 +128,7 @@ class LinearProbe:
                 assert val_loss.shape == ()
                 val_outputs = torch.cat(val_outputs)  # (n_val, K)
                 val_targets = torch.cat(val_targets)  # (n_val,)
-                assert val_outputs.shape == (len(val_subset), num_classes)
+                assert val_outputs.shape == (len(val_indices), num_classes)
             val_losses.append(val_loss.item())
 
         # final evaluation: the head has not changed since the validation of the last epoch, so those outputs are the final outputs
@@ -164,10 +164,6 @@ class LinearProbe:
 
                 # train all folds for all grid positions
                 for train_indices, val_indices in self.folds[target]:
-                    # a Subset is a lazy view of the fold: it only holds the dataset and the indices (no data is copied or loaded), and reads an example from the dataset when it is fetched
-                    train_subset = torch.utils.data.Subset(dataset, train_indices)
-                    val_subset = torch.utils.data.Subset(dataset, val_indices)
-
                     # data preprocessing (standardization): 
                     # improves the conditioning number of the embedding cloud (the ratio of its largest to its smallest singular value) i.e. it 
                     # homogenizes the spread of the cloud, which makes the optimization process easier. this matters especially in our context: 
@@ -190,7 +186,7 @@ class LinearProbe:
                     # train the current fold for each grid position
                     for lr in self._cfg["lrs"]:  # grid axis 1
                         for weight_decay in self._cfg["weight_decays"]:  # grid axis 2
-                            metrics, train_losses, val_losses = self.fit(target, train_subset, val_subset, mean, std, class_weights, lr, weight_decay)
+                            metrics, train_losses, val_losses = self.fit(target, dataset, train_indices, val_indices, mean, std, class_weights, lr, weight_decay)
                             # store results
                             entry = grid[self._setting_name(lr, weight_decay)]
                             entry["folds"].append(metrics)
