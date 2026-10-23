@@ -128,7 +128,6 @@ interpret:
     num_samples: 10000 # stratified subsample of the dataset
     batch_size: 128
     num_workers: 2 # image decoding only
-    chunk_size: 500 # samples per chunk_N.pt file
     layer_stride: 4 # every n-th layer, counted from the last
   methods: [effective_rank, cka, linear_probe]
   cka:

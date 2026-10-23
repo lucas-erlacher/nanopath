@@ -22,50 +22,38 @@ from sklearn.metrics import balanced_accuracy_score, f1_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
 from tqdm import tqdm
 
+from interpret.utils import standardize
+
 METRICS = ("balanced_accuracy", "macro_f1", "macro_auroc")  # the first one selects the best grid point
 
 
 class LinearProbe:
-    def __init__(self, layerwise_pooled_embeddings, seed, method_cfg):
-        self._pooled = layerwise_pooled_embeddings  # see LayerwisePooledEmbeddings in interpret.py
+    def __init__(self, datasets, device, seed, method_cfg):
+        self._datasets = datasets  # {layer name: ActivationDataset}, see interpret.py
+        self.device = device  # where the linear head lives (the datasets already hand out tensors on it)
         self.seed = seed
-        self._cfg = method_cfg  
-        self.results = None  
+        self._cfg = method_cfg
+        self.results = None
 
-        self.layer_names = list(self._pooled.records["cls"])
+        self.layer_names = list(datasets)
 
-        # the metadata of every example, only used here to build the folds and the briefing (the inputs and the labels of a fold are read from its records, see prepare_examples)
-        metadatas = []
-        group_ids = []
-        for record in self._pooled.records["cls"][self.layer_names[0]]:  # going over embeddings of layer 1 covers all datapoints i.e. all metadata
-            metadatas.append(record["metadata"])
-            group_ids.append(record["metadata"][self._cfg["leakage_group"]])
+        # the labels (integers) and their names are the same in the dataset of every layer, so the first one gives them all
+        first_dataset = list(datasets.values())[0]
+        self.labels = first_dataset.labels  
+        self.label_names = first_dataset.label_names  
+        group_ids = self.labels[self._cfg["leakage_group"]].numpy()
 
         # pre-compute folds (once per target)
         # DATA LEAKAGE PREVENTION
         # CLASS BALANCING
         self.folds = {}
         for target in self._cfg["targets"]:
-            labels = [metadata[target] for metadata in metadatas]
             splitter = StratifiedGroupKFold(n_splits=self._cfg["folds"], shuffle=True, random_state=seed)
             self.folds[target] = []
-            for train_indices, val_indices in splitter.split(list(range(self._pooled.num_examples)), labels, groups=group_ids):
+            for train_indices, val_indices in splitter.split(list(range(first_dataset.num_examples)), self.labels[target].numpy(), groups=group_ids):
                 self.folds[target].append((train_indices.tolist(), val_indices.tolist()))
 
-        # lookup table mapping class names (strings etc) to integers.
-        # the class set of every target is fixed once (sorted), so a class always gets the same integer label
-        self.class_index = {}
-        for target in self._cfg["targets"]:
-            class_values = set()
-            # collect possible vales
-            for metadata in metadatas:
-                class_values.add(metadata[target])
-            # compute mapping from value to id (= the integer index)
-            self.class_index[target] = {}
-            for index, class_value in enumerate(sorted(class_values)):
-                self.class_index[target][class_value] = index
-
-        self.briefing = self.print_briefing(metadatas, group_ids)
+        self.briefing = self.print_briefing(first_dataset)
 
     # -------------------------------------------------------------------------------------------------
     # TRAINING + EVALUATION
@@ -74,59 +62,41 @@ class LinearProbe:
     def _setting_name(self, lr, weight_decay):
         return f"lr={lr:g},weight_decay={weight_decay:g}"
 
-    # The inputs and the labels of the examples at `indices`, one row per index, both built from the records at those indices: 
-    # the inputs are [CLS, patch mean] concatenated, the label comes from the metadata of each record.
-    def prepare_examples(self, layer_name, target, indices):
-        # prepare inputs
-        cls_embeddings = self._pooled.stack("cls", layer_name, indices)  # (n, C), n is the number of indices
-        patch_embeddings = self._pooled.stack("patch_mean", layer_name, indices)  # (n, C)
-        # both lists hold the examples in the same order (LayerwisePooledEmbeddings appends their records in two consecutive lines of one loop iteration), so row i of both is the same example
-        inputs = torch.cat([cls_embeddings, patch_embeddings], dim=1)  # (n, 2C)
-        assert inputs.shape == (len(indices), 2 * cls_embeddings.shape[1])
+    # The inputs and the labels of one batch of an ActivationDataset: the inputs are [CLS, patch mean] concatenated, the labels are the integers of the target.
+    def prepare_batch(self, batch, target):
+        inputs = torch.cat([batch["cls"], batch["patch_mean"]], dim=1)  # (batch, 2C)
+        labels = batch["labels"][target]  # (batch,)
+        assert inputs.shape == (len(labels), 2 * batch["cls"].shape[1])
+        return inputs, labels
 
-        # prepare labels
-        labels = []
-        for i in indices:
-            metadata = self._pooled.records["cls"][layer_name][i]["metadata"]
-            labels.append(self.class_index[target][metadata[target]])
-        return inputs, torch.tensor(labels, device=inputs.device)
-
-    # Trains one linear head on (train_inputs, train_labels) and returns its metrics on (val_inputs, val_labels) after the final epoch and its per-epoch train and validation loss.
-    # The validation loss is a diagnostic only. Both pairs are prepared and standardized in the same way (see run()).
-    def fit(self, target, train_inputs, train_labels, val_inputs, val_labels, lr, weight_decay):
+    # Trains one linear head on the training subset and returns its metrics on the validation subset after the final epoch and its per-epoch train and validation loss.
+    # The validation loss is a diagnostic only. Both subsets are prepared and standardized in the same way (with the training statistics mean and std, see run()).
+    def fit(self, target, train_subset, val_subset, mean, std, class_weights, lr, weight_decay):
         torch.manual_seed(self.seed)  # reseeded for every (fold, grid point), so a training does not depend on the loop order
         generator = torch.Generator().manual_seed(self.seed)
-        
+        train_loader = torch.utils.data.DataLoader(train_subset, batch_size=self._cfg["batch_size"], shuffle=True, generator=generator)  # the training examples in a new random order every epoch
+        val_loader = torch.utils.data.DataLoader(val_subset, batch_size=self._cfg["batch_size"])
+
         # create probing layer
-        num_classes = len(self.class_index[target])
-        head = torch.nn.Linear(train_inputs.shape[1], num_classes).to(train_inputs.device)
+        num_classes = len(class_weights)
+        head = torch.nn.Linear(mean.shape[0], num_classes).to(self.device)
         optimizer = torch.optim.Adam(head.parameters(), lr=lr, weight_decay=weight_decay)
 
-        # CLASS BALANCING
-        class_weights = len(train_labels) / (num_classes * torch.bincount(train_labels, minlength=num_classes))  # (K,)
-        assert class_weights.shape == (num_classes,)
 
         train_losses = []
         val_losses = []
         for epoch in range(self._cfg["epochs"]):
-            # shuffle train data
-            order = torch.randperm(len(train_inputs), generator=generator).to(train_inputs.device)  # the training examples in a new random order
-            
             # train epoch
             batch_losses = []
-            for start in range(0, len(order), self._cfg["batch_size"]):
-                batch_row_idxs = order[start:start + self._cfg["batch_size"]]
+            for batch in train_loader:
+                inputs, targets = self.prepare_batch(batch, target)  # (batch, D), (batch,)
+                inputs = standardize(inputs, mean, std)
+                assert targets.shape == (len(inputs),)
 
-                # slice out batch
-                batch_rows = train_inputs[batch_row_idxs]  # (batch, D)
-                batch_targets = train_labels[batch_row_idxs]  # (batch,)
-                assert batch_rows.shape == (len(batch_row_idxs), train_inputs.shape[1]) 
-                assert batch_targets.shape == (len(batch_row_idxs),)
-                
                 # forward and backward passes
-                outputs = head(batch_rows)  # (batch, K), one score per class
-                assert outputs.shape == (len(batch_row_idxs), num_classes)
-                loss = F.cross_entropy(outputs, batch_targets, weight=class_weights)  # scalar (loss computed per example, times its class weight, then the weighted mean over the batch)
+                outputs = head(inputs)  # (batch, K), one score per class
+                assert outputs.shape == (len(inputs), num_classes)
+                loss = F.cross_entropy(outputs, targets, weight=class_weights)  # scalar (loss computed per example, times its class weight, then the weighted mean over the batch)
                 assert loss.shape == ()
                 optimizer.zero_grad()
                 loss.backward()
@@ -135,24 +105,37 @@ class LinearProbe:
             train_loss = torch.stack(batch_losses).mean()  # mean of the batch losses
             assert train_loss.shape == ()
             train_losses.append(train_loss.item())
-            
+
             # validation at end of train epoch
             with torch.no_grad():
-                # no need for batched loop because validation set is small
-                val_outputs = head(val_inputs)  # (n_val, K)
-                assert val_outputs.shape == (len(val_inputs), num_classes)
-                val_loss = F.cross_entropy(val_outputs, val_labels)
+                batch_losses = []
+                val_outputs = []  # collected for the metrics of the last epoch
+                val_targets = [] # collected for the metrics of the last epoch
+                for batch in val_loader:
+                    inputs, targets = self.prepare_batch(batch, target)  # (batch, D), (batch,)
+                    inputs = standardize(inputs, mean, std)
+                    assert targets.shape == (len(inputs),)
+
+                    # forward pass
+                    outputs = head(inputs)  # (batch, K), one score per class
+                    assert outputs.shape == (len(inputs), num_classes)
+                    loss = F.cross_entropy(outputs, targets)  # scalar, unweighted: the evaluation is not balanced
+                    assert loss.shape == ()
+                    batch_losses.append(loss)
+                    val_outputs.append(outputs)
+                    val_targets.append(targets)
+                val_loss = torch.stack(batch_losses).mean()  # mean of the batch losses
                 assert val_loss.shape == ()
+                val_outputs = torch.cat(val_outputs)  # (n_val, K)
+                val_targets = torch.cat(val_targets)  # (n_val,)
+                assert val_outputs.shape == (len(val_subset), num_classes)
             val_losses.append(val_loss.item())
 
-        # final evaluation 
-        with torch.no_grad():
-            val_outputs = head(val_inputs)
-            val_probabilities = torch.softmax(val_outputs, dim=1)
-        probabilities = val_probabilities.cpu().numpy()
-        y_true = val_labels.cpu().numpy()
+        # final evaluation: the head has not changed since the validation of the last epoch, so those outputs are the final outputs
+        probabilities = torch.softmax(val_outputs, dim=1).cpu().numpy()
+        y_true = val_targets.cpu().numpy()
         y_pred = probabilities.argmax(axis=1)
-        
+
         # compute metrics
         metrics = {
             "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
@@ -171,6 +154,7 @@ class LinearProbe:
             targets_results[target] = {}
 
             for layer_name in tqdm(self.layer_names, desc=f"linear probe ({target})"):  # iterate over layers, first to last
+                dataset = self._datasets[layer_name]
                 grid = {}
 
                 # initialize grid data structure
@@ -180,26 +164,33 @@ class LinearProbe:
 
                 # train all folds for all grid positions
                 for train_indices, val_indices in self.folds[target]:
-                    # prepare train and validation data
-                    train_inputs, train_labels = self.prepare_examples(layer_name, target, train_indices)
-                    val_inputs, val_labels = self.prepare_examples(layer_name, target, val_indices)
+                    # a Subset is a lazy view of the fold: it only holds the dataset and the indices (no data is copied or loaded), and reads an example from the dataset when it is fetched
+                    train_subset = torch.utils.data.Subset(dataset, train_indices)
+                    val_subset = torch.utils.data.Subset(dataset, val_indices)
 
                     # data preprocessing (standardization): 
                     # improves the conditioning number of the embedding cloud (the ratio of its largest to its smallest singular value) i.e. it 
                     # homogenizes the spread of the cloud, which makes the optimization process easier. this matters especially in our context: 
                     # we use the same fixed set of learning rates for every layer, but the embedding clouds after different layers can have vastly different scales and geometryies,
                     # so homogenization is key to one set of of learning rates being meaningful across layers (else we would have to tune them per-layer).
+                    # load the whole training fold at once (the rows of the whole blocks), for the statistics and the class weights
+                    train_inputs = torch.cat([dataset.get_block("cls")[train_indices], dataset.get_block("patch_mean")[train_indices]], dim=1)
+                    train_labels = dataset.get_block(target)[train_indices]
                     mean = train_inputs.mean(dim=0)
                     std = train_inputs.std(dim=0)
                     # DATA LEAKAGE PREVENTION
-                    # both folds are standardized with training statistics (no leakage of validation statistics into training set)
-                    train_inputs = (train_inputs - mean) / std
-                    val_inputs = (val_inputs - mean) / std
+                    # fit() standardizes every batch of both folds with these training statistics (no leakage of validation statistics into training set)
+
+                    # CLASS BALANCING
+                    # fit() weights the loss of every class with these weights, which come from the training fold only
+                    num_classes = len(self.label_names[target])
+                    class_weights = len(train_labels) / (num_classes * torch.bincount(train_labels, minlength=num_classes))  # (K,)
+                    assert class_weights.shape == (num_classes,)
 
                     # train the current fold for each grid position
                     for lr in self._cfg["lrs"]:  # grid axis 1
                         for weight_decay in self._cfg["weight_decays"]:  # grid axis 2
-                            metrics, train_losses, val_losses = self.fit(target, train_inputs, train_labels, val_inputs, val_labels, lr, weight_decay)
+                            metrics, train_losses, val_losses = self.fit(target, train_subset, val_subset, mean, std, class_weights, lr, weight_decay)
                             # store results
                             entry = grid[self._setting_name(lr, weight_decay)]
                             entry["folds"].append(metrics)
@@ -234,10 +225,11 @@ class LinearProbe:
 
     # One statistics printout in an ASCII box, once, before the training starts: the plan, the references, the data and the folds, and the feature scale per layer.
     # Returns the same numbers as a dict, which is saved in the results.
-    def print_briefing(self, metadatas, group_ids):
+    def print_briefing(self, first_dataset):
         num_grid_points = len(self._cfg["lrs"]) * len(self._cfg["weight_decays"])
-        one_input, _ = self.prepare_examples(self.layer_names[0], self._cfg["targets"][0], [0])  # the labels are not needed here, only the shape of an input
-        input_dim = one_input.shape[1]
+        input_dim = 2 * first_dataset.channel_dim  # [CLS, patch mean]
+        group_field = self._cfg["leakage_group"]
+        group_names = self.label_names[group_field]
 
         num_trainings = len(self._cfg["targets"]) * len(self.layer_names) * self._cfg["folds"] * num_grid_points
         total_steps = 0  # optimizer steps of all trainings: every target has its own folds, every fold is trained for every layer and grid point
@@ -247,61 +239,47 @@ class LinearProbe:
 
         lines = ["LINEAR PROBE: run briefing", "", "PLAN"]
         lines.append(f"targets: {', '.join(self._cfg['targets'])} | layers: {', '.join(self.layer_names)} | input: [CLS, patch mean], {input_dim} values")
-        lines.append(f"examples: {self._pooled.num_examples} tiles in {len(set(group_ids))} groups of {self._cfg['leakage_group']} | folds: {self._cfg['folds']} per target (StratifiedGroupKFold on {self._cfg['leakage_group']}, stratified on the target, seed {self.seed})")
+        lines.append(f"examples: {first_dataset.num_examples} tiles in {len(group_names)} groups of {self._cfg['leakage_group']} | folds: {self._cfg['folds']} per target (StratifiedGroupKFold on {self._cfg['leakage_group']}, stratified on the target, seed {self.seed})")
         lines.append(f"grid: {len(self._cfg['lrs'])} learning rates x {len(self._cfg['weight_decays'])} weight decays = {num_grid_points} settings | {self._cfg['epochs']} epochs, batch size {self._cfg['batch_size']}")
         lines.append(f"total: {num_trainings} trainings, about {total_steps / 1e6:.1f} M optimizer steps")
         lines.append("")
         lines.append("REFERENCES")
-        lines.append(f"seed: {self.seed} | deterministic algorithms: {torch.are_deterministic_algorithms_enabled()} | device: {self._pooled.records['cls'][self.layer_names[0]][0]['embedding'].device}")
+        lines.append(f"seed: {self.seed} | deterministic algorithms: {torch.are_deterministic_algorithms_enabled()} | device: {self.device}")
         lines.append("")
         lines.append("DATA")
         class_counts = {}
         for target in self._cfg["targets"]:
-            counts = Counter()
-            for metadata in metadatas:
-                counts[metadata[target]] += 1
+            counts = Counter(self.label_names[target][k] for k in self.labels[target].tolist())
             class_counts[target] = dict(counts)
-            lines.append(f"{target}: {self._format_counts(counts, self.class_index[target])}")
+            lines.append(f"{target}: {self._format_counts(counts, self.label_names[target])}")
         if len(self._cfg["targets"]) >= 2:  # how the first two targets overlap, to see if they are confounded
             first = self._cfg["targets"][0]
             second = self._cfg["targets"][1]
-            second_values = list(self.class_index[second])
-            lines.append(f"tiles per {first} (rows) and {second} (columns): {', '.join(map(str, second_values))}")
-            for first_value in self.class_index[first]:
+            lines.append(f"tiles per {first} (rows) and {second} (columns): {', '.join(map(str, self.label_names[second]))}")
+            for first_index, first_name in enumerate(self.label_names[first]):
                 row = []
-                for second_value in second_values:
-                    count = 0
-                    for metadata in metadatas:
-                        if metadata[first] == first_value and metadata[second] == second_value:
-                            count += 1
+                for second_index in range(len(self.label_names[second])):
+                    count = ((self.labels[first] == first_index) & (self.labels[second] == second_index)).sum().item()
                     row.append(str(count))
-                lines.append(f"  {first_value}: {', '.join(row)}")
+                lines.append(f"  {first_name}: {', '.join(row)}")
         fold_stats = {}  # per target (every target has its own folds), a list with one entry per fold
         for target in self._cfg["targets"]:
             fold_stats[target] = []
             for fold, (train_indices, val_indices) in enumerate(self.folds[target]):
-                train_groups = set()
-                for i in train_indices:
-                    train_groups.add(group_ids[i])
-                val_groups = set()
-                for i in val_indices:
-                    val_groups.add(group_ids[i])
-                train_counts = Counter()
-                for i in train_indices:
-                    train_counts[metadatas[i][target]] += 1
-                val_counts = Counter()
-                for i in val_indices:
-                    val_counts[metadatas[i][target]] += 1
-                fold_stats[target].append({"train_groups": sorted(train_groups), "val_groups": sorted(val_groups), "classes": {"train": dict(train_counts), "val": dict(val_counts)}})
+                train_groups = sorted({group_names[k] for k in self.labels[group_field][train_indices].tolist()})
+                val_groups = sorted({group_names[k] for k in self.labels[group_field][val_indices].tolist()})
+                train_counts = Counter(self.label_names[target][k] for k in self.labels[target][train_indices].tolist())
+                val_counts = Counter(self.label_names[target][k] for k in self.labels[target][val_indices].tolist())
+                fold_stats[target].append({"train_groups": train_groups, "val_groups": val_groups, "classes": {"train": dict(train_counts), "val": dict(val_counts)}})
                 lines.append(
-                    f"fold {fold} | {target} | train {len(train_indices)} tiles, {len(train_groups)} groups: {self._format_counts(train_counts, self.class_index[target])}"
-                    f" | val {len(val_indices)} tiles, {len(val_groups)} groups: {self._format_counts(val_counts, self.class_index[target])}"
+                    f"fold {fold} | {target} | train {len(train_indices)} tiles, {len(train_groups)} groups: {self._format_counts(train_counts, self.label_names[target])}"
+                    f" | val {len(val_indices)} tiles, {len(val_groups)} groups: {self._format_counts(val_counts, self.label_names[target])}"
                 )
         lines.append("")
         lines.append("FEATURE SCALE (before standardization)")
         feature_scale = {}
-        for layer_name in self.layer_names:
-            inputs, _ = self.prepare_examples(layer_name, self._cfg["targets"][0], list(range(self._pooled.num_examples)))  # the labels are not needed here
+        for layer_name, dataset in self._datasets.items():
+            inputs = torch.cat([dataset.get_block("cls"), dataset.get_block("patch_mean")], dim=1)  # the whole layer at once, [CLS, patch mean] like in prepare_batch
             norms = inputs.norm(dim=1)
             constant_features = int((inputs.std(dim=0) == 0).sum().item())
             feature_scale[layer_name] = {"norm_mean": norms.mean().item(), "norm_std": norms.std().item(), "constant_features": constant_features}

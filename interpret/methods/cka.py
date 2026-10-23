@@ -8,27 +8,30 @@ from tqdm import tqdm
 
 
 class CKA:
-    def __init__(self, layerwise_pooled_embeddings, seed, method_cfg):
-        self._pooled = layerwise_pooled_embeddings  # see LayerwisePooledEmbeddings in interpret.py
+    def __init__(self, datasets, seed, method_cfg):
+        self._datasets = datasets  # {layer name: ActivationDataset}, see interpret.py
 
         # the n x n tables may need more RAM than the data allows, so keep a random subset of at most max_samples examples (label-free, so not exactly stratified).
         # it is drawn once, so every layer keeps the same examples.
         # a random subset of k examples from the stratified extraction shifts a class proportion p by at most about sqrt(p(1-p)/k) (an estimate: 0.7 percentage points at k = 5,000
         # for two balanced classes), so the subset stays close to stratified, especially at large max_samples.
-        permutation = torch.randperm(self._pooled.num_examples, generator=torch.Generator().manual_seed(seed))
+        first_dataset = list(datasets.values())[0]  # the datasets of all layers advertise the same number of examples and vector types
+        self.vector_types = first_dataset.vector_types  # {vector type: description}
+        permutation = torch.randperm(first_dataset.num_examples, generator=torch.Generator().manual_seed(seed))
         self.sampled_indices = permutation[:method_cfg["max_samples"]].tolist()
         self.results = None  # {vector type: {layer a: {layer b: CKA}}}, set by run()
 
     def run(self):
         results = {}
 
-        for vector_type, records_by_layer in self._pooled.records.items():  # iterate over vector types (patch_mean, cls)
+        for vector_type in self.vector_types:  # iterate over vector types
             flattened_tables = {}  # one n x n table per layer, flattened to a vector, all held at once: max_samples caps the RAM
             squared_lengths = {}
 
             # compute the similarity structure tables for each layer (and perform a precomputation for step 6)
-            for layer_name in tqdm(records_by_layer, desc=f"build similarity structure tables ({vector_type})"):  # iterate over layers, first to last
-                features = self._pooled.stack(vector_type, layer_name, self.sampled_indices)  # (n, C), one row per sampled example
+            for layer_name, dataset in tqdm(self._datasets.items(), desc=f"build similarity structure tables ({vector_type})"):  # iterate over layers, first to last
+                all_features = dataset.get_block(vector_type)  # (N, C), one row per example (the whole layer, on the device)
+                features = all_features[self.sampled_indices]  # (n, C), one row per sampled example
                 num_examples = features.shape[0]
 
                 # step 4-5 (center features: HX)
@@ -63,7 +66,7 @@ class CKA:
     # One heatmap per vector type, layers in forward-pass order on both axes. Returns {file name: figure}; main() saves them.
     def plot(self):
         figures = {}
-        for vector_type, title in (("patch_mean", "mean over the patch tokens"), ("cls", "CLS token")):
+        for vector_type, title in self.vector_types.items():
             layer_names = list(self.results[vector_type])
             matrix = []
             for layer_a in layer_names:

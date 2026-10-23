@@ -6,18 +6,20 @@ from tqdm import tqdm
 
 
 class EffectiveRank:
-    def __init__(self, layerwise_pooled_embeddings):
-        self._pooled = layerwise_pooled_embeddings  # see LayerwisePooledEmbeddings in interpret.py
+    def __init__(self, datasets):
+        self._datasets = datasets  # {layer name: ActivationDataset}, see interpret.py
+        first_dataset = list(datasets.values())[0]
+        self.vector_types = first_dataset.vector_types  # {vector type: description}, advertised by the datasets (the same in every layer)
         self.results = None  # {vector type: {layer: effective rank}}, set by run()
 
     def run(self):
         # One effective rank value per (vector type, layer): results[vector type][layer]
         results = {}
-        for vector_type, records_by_layer in self._pooled.records.items():  # iterate over vector types (patch_mean, cls)
+        for vector_type in self.vector_types:  # iterate over vector types
             results[vector_type] = {}
 
-            for layer_name in tqdm(records_by_layer, desc=f"Effective rank ({vector_type})"):  # iterate over layers, first to last
-                features = self._pooled.stack(vector_type, layer_name, range(self._pooled.num_examples))  # (n, C), one row per example
+            for layer_name, dataset in tqdm(self._datasets.items(), desc=f"Effective rank ({vector_type})"):  # iterate over layers, first to last
+                features = dataset.get_block(vector_type)  # (n, C), one row per example (the whole layer, on the device)
 
                 # center the embedding cloud (PCA-style) so the singular values describe the variation within it, not its offset from the origin
                 features = features - features.mean(dim=0, keepdim=True)
@@ -33,7 +35,7 @@ class EffectiveRank:
     # runs from the first to the last layer. Returns {file name: figure}; main() saves them.
     def plot(self):
         figures = {}
-        for vector_type, title in (("patch_mean", "mean over the patch tokens"), ("cls", "CLS token")):
+        for vector_type, title in self.vector_types.items():
             layer_names = list(self.results[vector_type])
             ranks = []
             for layer_name in layer_names:

@@ -1,5 +1,5 @@
 # interpret/utils.py: helpers of the interpretability rig.
-# write_dashboard builds the self-contained dashboard.html of a run: its settings, and per method the plots and the README parts as toggles.
+# standardize puts a batch of vectors on a common scale. write_dashboard builds the self-contained dashboard.html of a run: its settings, and per method the plots and the README parts as toggles.
 
 import base64
 import html
@@ -29,17 +29,22 @@ pre { overflow-x: auto; }
 """
 
 
+# standardizes (vectorized). 
+def standardize(inputs, mean, std):
+    return (inputs - mean) / std
+
+
 # Writes results_dir/dashboard.html, to open with a double click: the settings of the run, then one section per method with its plots (embedded in the file,
 # so it can be moved or sent around) and the parts of that method's subsection of README.md (papers, questions, notes, ...) as toggles.
 def write_dashboard(results_dir, data_dir, cfg):
     icfg = cfg["interpret"]
-    metadata = json.loads((data_dir / "metadata.json").read_text())
+    info = json.loads((data_dir / "info.json").read_text())
     readme = (Path(__file__).resolve().parent / "README.md").read_text()
 
     summary = {
         "checkpoint": icfg["checkpoint_path"], "weights": icfg["model_weights"], "dataset": icfg["dataset"],
-        "examples": icfg["extract"]["num_samples"], "seed": icfg["seed"],
-        "kept layers": ", ".join(metadata["kept_layers"]), "extraction git commit": metadata["git_commit"],
+        "examples": info["num_samples"], "seed": icfg["seed"],
+        "kept layers": ", ".join(info["kept_layers"]), "extraction git commit": info["git_commit"],
     }
     summary_rows = ""
     for key, value in summary.items():

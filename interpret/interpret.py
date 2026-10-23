@@ -1,4 +1,4 @@
-# interpret/interpret.py: extracts hooked activations to chunks, then runs the configured methods (see README.md).
+# interpret/interpret.py: extracts hooked activations to files, then runs the configured methods on them (see README.md).
 import os
 import sys
 import math
@@ -66,9 +66,9 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
         assert tokens == global_state["tokens"], f"{where_layer} token counts {tokens} mismatch the first layer's {global_state['tokens']}."
 
 
-# Samples tiles (stratified, seeded), runs the model, checks the hook contract and writes chunk_N.pt files plus
-# metadata.json (last, so it marks a complete run). `settings` determines the chunks (hashed in main, saved in metadata.json).
-def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg, output_dir):
+# Samples tiles (stratified, seeded) and writes the extraction (layout in README.md): the labels, then one pass of the model over the tiles that collects the activations and the images.
+# info.json is written last, so it marks a complete run. `settings` determines the files (hashed in main, saved in info.json).
+def extract_activations(model, dataset, transform, settings, extract_cfg, output_dir):
     # Seeded subsample that keeps the proportions of the dataset's stratification dimension (a metadata field).
     dimension = settings["dataset_config"]["stratification_dimension"]
     values = [metadata[dimension] for _, metadata in dataset.records]
@@ -79,8 +79,21 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
         subset, batch_size=extract_cfg["batch_size"], shuffle=False, num_workers=extract_cfg["num_workers"],
         multiprocessing_context="fork", collate_fn=lambda batch: tuple(zip(*batch)),
     )
+    num_samples = len(sampled_indices)
 
-    output_dir.mkdir(parents=True)
+    (output_dir / "activations").mkdir(parents=True)
+    (output_dir / "precomputed").mkdir()
+
+    # LABELS: every metadata field as integers (its sorted unique values become 0, 1, 2, ...) plus the names to map them back. Row i is the i-th sampled tile, like in every other file.
+    sampled_metadata = [dataset.records[i][1] for i in sampled_indices]
+    labels = {}  # e.g. {"medical_center": tensor([0, 1, 1, 0, ...])} - each tensor holds one integer per datapoint (int representation of metadata strings)
+    label_names = {}  # e.g. {"medical_center": ["center_a", "center_b"]} - this maps the integers back to human readable strings
+    for field in sampled_metadata[0]:
+        label_names[field] = sorted({metadata[field] for metadata in sampled_metadata})
+        value_to_integer = {value: integer for integer, value in enumerate(label_names[field])}
+        labels[field] = torch.tensor([value_to_integer[metadata[field]] for metadata in sampled_metadata])
+    torch.save(labels, output_dir / "labels.pt")
+    (output_dir / "label_names.json").write_text(json.dumps(label_names))
 
     storage_dict = {}
     layer_names = model.register_interpretability_hooks(storage_dict)
@@ -93,112 +106,110 @@ def extract_features_to_chunks(model, dataset, transform, settings, extract_cfg,
 
     interface_state = {}  # remembers the token counts of the first layer of the first batch, which all later ones must match
 
-    chunk_idx = 0
-    chunk_samples = []
-
+    # EXTRACTION PASS: the tensors of every kept layer and the images are allocated at full size in RAM after the first batch (no double peak from concatenating), each batch fills in its rows, and everything is saved at the end.
+    # The patch mean is computed here from the float32 tokens, so the methods never average tokens.
+    tensors = {}
+    start = 0  # the first row of the current batch
     with torch.inference_mode():
-        for batch_images, batch_metadata in tqdm(loader, desc="Extracting"):
+        for batch_images, _ in tqdm(loader, desc="Extracting"):
             batch_size = len(batch_images)
-            processed_images = torch.stack([transform(image) for image in batch_images])
-
+            processed_images = torch.stack([transform(image) for image in batch_images])  # (batch, 3, H, W)
             storage_dict.clear()  # the hooks hold this dict, so clear it in place
             model(processed_images)
 
             assert_hook_interface(storage_dict, layer_names, batch_size, interface_state)  # before the stride
 
-            for b in range(batch_size):
-                # One sample's kept layers; copy=True because saving a view would serialize the whole batch.
-                sample_layers = {}
-                for layer in kept_layer_names:
-                    sample_layers[layer] = {}
-                    for group in REQUIRED_GROUPS:
-                        sample_layers[layer][group] = storage_dict[layer][group][b, :, :].to(torch.float32, copy=True)
+            rows = slice(start, start + batch_size)
+            # store images
+            if start == 0:  # allocate the image tensor with the first batch (we only know dimensions at runtime)
+                num_channels = processed_images.shape[1]
+                height = processed_images.shape[2]
+                width = processed_images.shape[3]
+                images = torch.empty(num_samples, num_channels, height, width)
+            images[rows] = processed_images
+            
+            for layer in kept_layer_names:
+                patch = storage_dict[layer]["patch"]  # (batch, seq_len, channel_dim)
+                if layer not in tensors:  # initialize tensors for layer if not yet initialized
+                    seq_len = patch.shape[1]
+                    channel_dim = patch.shape[2]
+                    tensors[layer] = {
+                        "patch_tokens": torch.empty(num_samples, seq_len, channel_dim),
+                        "cls": torch.empty(num_samples, channel_dim),
+                        "patch_mean": torch.empty(num_samples, channel_dim),
+                    }
+                # store patch data
+                tensors[layer]["patch_tokens"][rows] = patch
+                tensors[layer]["patch_mean"][rows] = patch.mean(dim=1)  # mean over the patch tokens
+                # store CLS data
+                tensors[layer]["cls"][rows] = storage_dict[layer]["cls"][:, 0, :]  # the CLS group is (batch, 1, C), indexing out position 0 gives plain C-vectors
+            start += batch_size
+    assert start == num_samples
 
-                # Sample format (read by ChunkedFeatureDataset): image, metadata (from the dataset), layers {layer: {group: (T, C)}};
-                # the image is cloned because a view would keep the whole batch alive.
-                sample = {
-                    "image": processed_images[b, :, :, :].clone(),
-                    "metadata": batch_metadata[b],
-                    "layers": sample_layers
-                }
-                chunk_samples.append(sample)
+    for layer, layer_tensors in tensors.items():
+        torch.save(layer_tensors["patch_tokens"], output_dir / "activations" / f"{layer}_patch_tokens.pt")
+        torch.save(layer_tensors["cls"], output_dir / "activations" / f"{layer}_cls.pt")
+        torch.save(layer_tensors["patch_mean"], output_dir / "precomputed" / f"{layer}_patch_mean.pt")
+    torch.save(images, output_dir / "images.pt")
 
-                if len(chunk_samples) == extract_cfg["chunk_size"]:
-                    torch.save(chunk_samples, output_dir / f"chunk_{chunk_idx}.pt")
-                    chunk_idx += 1
-                    chunk_samples = []
-
-        # The last, partial chunk.
-        if chunk_samples:
-            torch.save(chunk_samples, output_dir / f"chunk_{chunk_idx}.pt")
-
-    metadata = {
+    info = {
         **settings,
         # Exact code version; -dirty means uncommitted changes.
         "git_commit": subprocess.check_output(["git", "describe", "--always", "--dirty"], cwd=Path(__file__).resolve().parent, text=True).strip(),
-        "chunk_size": extract_cfg["chunk_size"],
         "kept_layers": kept_layer_names,
         "sampled_dataset_indices": sampled_indices,
     }
-    (output_dir / "metadata.json").write_text(json.dumps(metadata))
+    (output_dir / "info.json").write_text(json.dumps(info))
 
 
 # -------------------------------------------------------------------------------------------------
-# DATASET CLASSES
+# DATASET
 # -------------------------------------------------------------------------------------------------
 
-# Serves saved samples as (image, metadata, layers) on `device`: sample idx is at idx % chunk_size of chunk_{idx // chunk_size}.pt.
-class ChunkedFeatureDataset(torch.utils.data.Dataset):
-    def __init__(self, data_dir, device):
-        self.data_dir = Path(data_dir)
+# One layer of an extraction (layout in README.md): row i of every file is the i-th sampled tile. The constructor sends nothing to `device`: the tensors are CPU tensors in memory
+# (the big files `patch_tokens` and `image` are memory-mapped and only opened when enabled), and the two ways out, get_block (a whole block) and __getitem__ (examples), are the only places that move data to the device
+# (keep DataLoader's num_workers at 0, workers cannot use the GPU). A part that is not enabled is an empty tensor, so items always have the same keys.
+class ActivationDataset(torch.utils.data.Dataset):
+    def __init__(self, data_dir, layer_name, device, patch_tokens=False, image=False):
+        data_dir = Path(data_dir)
         self.device = device
-        metadata = json.loads((self.data_dir / "metadata.json").read_text())
-        self.chunk_size = metadata["chunk_size"]
-        self.num_samples = len(metadata["sampled_dataset_indices"])
-        self.current_chunk_idx = None
-        self.current_chunk_samples = None
+        # load data that the dataset spans
+        # the activations of this layer for every example: the vectors, (N, C) each, are in memory, the big patch tokens, (N, 256, C), are memory-mapped and None unless enabled
+        self.activations = {
+            "cls": torch.load(data_dir / "activations" / f"{layer_name}_cls.pt"),
+            "patch_tokens": torch.load(data_dir / "activations" / f"{layer_name}_patch_tokens.pt", mmap=True) if patch_tokens else None,
+            "patch_mean": torch.load(data_dir / "precomputed" / f"{layer_name}_patch_mean.pt"),
+        }
+        self.images = torch.load(data_dir / "images.pt", mmap=True) if image else None  # (N, 3, H, W)
+        self.labels = torch.load(data_dir / "labels.pt")  # e.g. {"medical_center": tensor([0, 1, 1, 0, ...])} - each tensor holds one integer per datapoint (int representation of metadata strings)
+        self.label_names = json.loads((data_dir / "label_names.json").read_text())  # e.g. {"medical_center": ["center_a", "center_b"]} - this maps the integers back to human readable strings
+        # what the dataset advertises about its data
+        self.num_examples = len(self.activations["cls"])  # the number of extracted tiles
+        self.channel_dim = self.activations["cls"].shape[1]  # the length of every vector (cls, patch mean and each patch token)
+        self.vector_types = {"cls": "CLS token", "patch_mean": "mean over the patch tokens"}  # the vectors every item holds, with a description for titles
 
     def __len__(self):
-        return self.num_samples
+        return self.num_examples
 
-    def __getitem__(self, idx):
-        chunk_idx = idx // self.chunk_size
-        position = idx % self.chunk_size
+    # a whole small block of this layer on the device: "cls", "patch_mean" or the labels of a metadata field. The big blocks (`patch_tokens`, `image`) are deliberately not available here: they are memory-mapped
+    # so that they are never loaded whole, and are only read in batches through __getitem__
+    def get_block(self, name):
+        assert name in self.vector_types or name in self.labels, f"'{name}' is not a small block, the big blocks are only read in batches through __getitem__"
+        block = self.activations[name] if name in self.vector_types else self.labels[name]
+        return block.to(self.device)
 
-        # One-chunk cache: methods iterate the samples sequentially.
-        if self.current_chunk_idx != chunk_idx:
-            self.current_chunk_samples = torch.load(self.data_dir / f"chunk_{chunk_idx}.pt", map_location=self.device, weights_only=False)
-            self.current_chunk_idx = chunk_idx
-
-        sample = self.current_chunk_samples[position]
-        return sample["image"], sample["metadata"], sample["layers"]
-
-
-# the layer-wise pooled embeddings of all examples: records[vector type][layer] is a list with one record per example, {"embedding": (C,) vector, "metadata": the metadata dict of that
-# example}, for the mean over the patch tokens ("patch_mean") and the CLS token ("cls"). every record of an example points to the same metadata dict (a reference, never copied or
-# mutated), so an embedding always carries the metadata of its own forward pass (hard mapping that cannot drift). built once in main() (it reads every chunk) and shared by the methods; 
-# stack() turns the records at the given example indices of one layer into an (n, C) matrix, one row per index.
-class LayerwisePooledEmbeddings:
-    def __init__(self, chunked_dataset):
-        self.num_examples = len(chunked_dataset)
-        self.records = {"patch_mean": {}, "cls": {}}
-
-        for i in tqdm(range(self.num_examples), desc="Collecting"):
-            _, metadata, layers = chunked_dataset[i]
-
-            for layer_name, groups in layers.items():
-                if layer_name not in self.records["patch_mean"]:
-                    self.records["patch_mean"][layer_name] = []
-                    self.records["cls"][layer_name] = []
-                # keep these two appends together in one loop iteration: both lists then hold the examples in the same order, which methods rely on (e.g. when combining the two vectors)
-                self.records["patch_mean"][layer_name].append({"embedding": groups["patch"].mean(dim=0), "metadata": metadata})  # mean over patch tokens
-                self.records["cls"][layer_name].append({"embedding": groups["cls"][0, :], "metadata": metadata})  # the CLS group is (1, C), indexing out 0-th position makes it a plain C-vector
-
-    def stack(self, vector_type, layer_name, indices):
-        embeddings = []
-        for i in indices:
-            embeddings.append(self.records[vector_type][layer_name][i]["embedding"])
-        return torch.stack(embeddings)
+    # one example (this is what DataLoader and Subset fetch); every returned tensor goes through .to(device)
+    def __getitem__(self, i):
+        not_loaded = torch.empty(0)
+        image = self.images[i] if self.images is not None else not_loaded
+        patch_tokens = self.activations["patch_tokens"][i] if self.activations["patch_tokens"] is not None else not_loaded
+        return {
+            "image": image.to(self.device),
+            "cls": self.activations["cls"][i].to(self.device),
+            "patch_tokens": patch_tokens.to(self.device),
+            "patch_mean": self.activations["patch_mean"][i].to(self.device),
+            "labels": {field: values[i].to(self.device) for field, values in self.labels.items()},
+        }
 
 
 # -------------------------------------------------------------------------------------------------
@@ -238,8 +249,8 @@ def set_seeds(seed):
     torch.backends.cudnn.allow_tf32 = False
 
 
-# Everything computes on ONE device (the GPU); main() is the only place that moves tensors or modules between
-# devices, every other function computes wherever its inputs already live.
+# Everything computes on ONE device (the GPU). main() picks it, moves the model and gives it to the datasets, which hold their tensors on it,
+# so the methods never move data between devices.
 def main():
 
     # ---- SETUP ----
@@ -257,7 +268,7 @@ def main():
     dataset_cfg = icfg["datasets"][icfg["dataset"]]
     dataset = load_dataset(icfg["dataset"], cfg["probe"]["dataset_roots"])
 
-    # Extractions are cached in output_dir/data/<hash of settings> (layout in README.md); if a run died, metadata.json is
+    # Extractions are cached in output_dir/data/<hash of settings> (layout in README.md); if a run died, info.json is
     # missing and loading crashes below: delete that directory and rerun.
     extract_cfg = icfg["extract"]
     settings = {
@@ -273,11 +284,11 @@ def main():
         print(f"Reusing extraction in {data_dir}")
     else:
         print(f"Extracting features into {data_dir}...")
-        extract_features_to_chunks(model, dataset, transform, settings, extract_cfg, data_dir)
-        (data_dir / "config.json").write_text(json.dumps(cfg, indent=2))  # the full config that produced these chunks (a reused extraction keeps its own)
+        extract_activations(model, dataset, transform, settings, extract_cfg, data_dir)
+        (data_dir / "config.json").write_text(json.dumps(cfg, indent=2))  # the full config that produced these files (a reused extraction keeps its own)
 
-    chunked_dataset = ChunkedFeatureDataset(data_dir, device)
-    
+    kept_layers = json.loads((data_dir / "info.json").read_text())["kept_layers"]  # in forward-pass order
+
     # ---- ANALYSIS ----
     # One results folder per extraction and set of methods, so other extractions or method subsets don't overwrite it.
     sorted_method_names = sorted(icfg["methods"])
@@ -286,19 +297,20 @@ def main():
     results_dir.mkdir(parents=True, exist_ok=True)
     (results_dir / "config.json").write_text(json.dumps(cfg, indent=2))  # the full config of this run
 
-    # pooling away the token dimension (257 tokens into 1 vector per example and layer) makes this  
-    # significantly smaller (> 100x) than the chunks, so materializing this is not a RAM issue. 
-    layerwise_pooled_embeddings = LayerwisePooledEmbeddings(chunked_dataset)  # computed once, shared by the methods
-
     results = {}
     for name in icfg["methods"]:
         print(f"Running {name}...")
+        # every method builds its own fresh datasets (one per kept layer) with exactly the blocks it needs: all data starts out on the CPU and moves to the device only when the method asks for it,
+        # so methods never depend on each other. 
         if name == "effective_rank":
-            method = EffectiveRank(layerwise_pooled_embeddings)
+            datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
+            method = EffectiveRank(datasets)
         elif name == "cka":
-            method = CKA(layerwise_pooled_embeddings, icfg["seed"], icfg[name])
+            datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
+            method = CKA(datasets, icfg["seed"], icfg[name])
         elif name == "linear_probe":
-            method = LinearProbe(layerwise_pooled_embeddings, icfg["seed"], icfg[name])
+            datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
+            method = LinearProbe(datasets, device, icfg["seed"], icfg[name])
         else:
             raise KeyError(f"Unknown method '{name}'; add it to the method dispatch in main() of interpret/interpret.py")
         method.run()

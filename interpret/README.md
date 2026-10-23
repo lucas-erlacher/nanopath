@@ -1,9 +1,9 @@
 # Interpretability rig
 
 `python -m interpret.interpret configs/main.yaml` (from the repo root) reads the `interpret:` block of the config: it
-extracts the hooked activations of a seeded, stratified sample of a dataset into chunk files, then runs the configured
-`methods` on them and saves their results and plots. Everything runs on one device, the GPU: `main()` is the only place
-that moves models or tensors (the loaded chunks go to the GPU, so methods compute on GPU tensors). A run needs a GPU, a
+extracts the hooked activations of a seeded, stratified sample of a dataset into files (one `ActivationDataset` per layer, see Output), then runs the configured
+`methods` on them and saves their results and plots. Everything runs on one device, the GPU: `main()` picks it, moves the model and gives it to the datasets, whose `get_block` and `__getitem__` are the only places that move data to it,
+so the methods never move data themselves. A run needs a GPU, a
 Nanopath checkpoint (it carries its training `config`, its `step` and the `model_ema`/`model` weights),
 and `probe.dataset_roots` pointing at the data.
 
@@ -88,23 +88,31 @@ Notes on the implementation:
   `replace=False` and `stratify=`: a seeded subsample that keeps the proportions of the stratification dimension.
   `num_samples` must be smaller than the dataset size.
 - `seed`: the one seed of the interpret config. It seeds the extraction sampler, CKA's random subset and, via `set_seeds`, every random number generator plus deterministic GPU mode (an operation without a deterministic implementation raises an error).
-- `extract.{num_samples, batch_size, num_workers, chunk_size, layer_stride}`: `layer_stride` keeps every n-th
+- `extract.{num_samples, batch_size, num_workers, layer_stride}`: `layer_stride` keeps every n-th
   layer counted from the last (the last is always kept); `num_workers` only parallelizes image decoding.
 - `methods`: the methods to run (`effective_rank`, `cka`); `cka.max_samples` caps the examples CKA uses (a seeded random subset, label-free so not exactly stratified), because its similarity tables are n × n (0.1 GB each at 5,000 examples, 0.4 GB at 10,000, 2.5 GB at 25,000); the other methods use all extracted examples.
 - `linear_probe`: `targets` (metadata fields to predict), `lrs` and `weight_decays` (the grid), `epochs`, `batch_size`, `leakage_group` (the metadata field whose values are never split across train and validation, `slide_id` for PathoROB) and `folds` (a `StratifiedGroupKFold` on that field).
 
 Storage per sample is `kept_layers x 257 tokens x C x 4 bytes` (float32) plus the 0.6 MB input image; for ViT-S (C=384)
-that is about 3.4 MB at stride 2 and 2.2 MB at stride 4, so a 500-sample chunk is 1.7 GB / 1.1 GB.
+that is about 3.4 MB at stride 2 and 2.2 MB at stride 4, so 10,000 samples take about 34 GB / 22 GB on disk. The extraction holds everything in RAM before saving it
+(as much as the files take on disk, plus the model and loader), so run it on a high-RAM runtime: it is a one-off operation per extraction.
 
 ## Output
 
 ```
 output_dir/                      # from the config
   data/
-    <hash>/                      # hash of everything that determines the chunks (checkpoint + step, weights, dataset + its config, seed, num_samples, layer_stride)
-      chunk_N.pt                 # the extracted samples
-      metadata.json              # settings, git commit, chunk size, kept layers, sampled dataset indices; written last by the extraction (marks it complete)
-      config.json                # the full config that produced these chunks, written right after a fresh extraction (extractions made before this was added lack it)
+    <hash>/                      # hash of everything that determines the files (checkpoint + step, weights, dataset + its config, seed, num_samples, layer_stride)
+      activations/
+        <layer>_patch_tokens.pt  # (N, 256, C) float32, the patch tokens of that layer: the big files (about 3.9 GB each for 10,000 samples and C=384)
+        <layer>_cls.pt           # (N, C) float32, the CLS token of that layer
+      precomputed/
+        <layer>_patch_mean.pt    # (N, C) float32, the mean over the patch tokens of that layer, computed once during the extraction
+      images.pt                  # (N, 3, H, W) float32, the model input of every tile (about 6 GB for 10,000 samples)
+      labels.pt                  # {metadata field: (N,) int64}, every metadata field as integers
+      label_names.json           # {metadata field: names}, the name of integer k is names[k] (sorted unique values of the sampled tiles)
+      info.json                  # settings, git commit, kept layers, sampled dataset indices; written last by the extraction (marks it complete)
+      config.json                # the full config that produced these files, written right after a fresh extraction
   results/
     <hash>_<methods>/            # one folder per extraction and set of methods (sorted by name), e.g. 8707bab631_cka_effective_rank
       results.json               # the results of all methods
@@ -115,11 +123,13 @@ output_dir/                      # from the config
 
 At the end of a run, `write_dashboard` (`utils.py`) writes `dashboard.html` into the results folder: the settings of the run, then for every method its plots (embedded in the file, so it can be moved or sent around) and the parts of its subsection of this README (papers, question, what the paper improves on, notes) as toggles. It splits a method's subsection at the lines starting with `Papers`, `Question`, `What the paper improves on` and `Notes on the implementation`.
 
-Each `chunk_N.pt` is a list of `chunk_size` samples (the last chunk may hold fewer), each a dict `{"image": (3, H, W)
-model input, "metadata": the dataset's metadata dict, "layers": {layer: {"patch": (N, C), "cls": (1, C)}}}`, all tensors
-float32. Methods read them through `ChunkedFeatureDataset`, which returns `(image, metadata, layers)` for one sample on the GPU. `LayerwisePooledEmbeddings(dataset)` turns it into what the current methods analyse: `records[vector type][layer]` is a list with one record per example, `{"embedding": (C,) vector, "metadata": the metadata dict of that example}` (vector types: the mean over the patch tokens and the CLS token). The metadata is a reference to the same dict in every record of an example, never copied or mutated, so an embedding always carries the metadata of its own forward pass; `stack(vector_type, layer, indices)` turns the records at those example indices into an (n, C) matrix.
+Row `i` of every file is the `i`-th sampled tile (`sampled_dataset_indices` in `info.json`), so the vectors, the image and the labels of an example sit at the same index by construction.
+Methods read one layer through `ActivationDataset(data_dir, layer, device)`, a `torch.utils.data.Dataset`: the constructor sends nothing to the device: the small tensors (`cls`, `patch_mean`, labels) are CPU tensors in memory, the two big files (`patch_tokens`, `image`) are opened only when enabled and memory-mapped (nothing is read until an item is fetched). Data leaves the dataset in two ways and both move it to the device: `get_block(name)` returns a whole small block (`"cls"`, `"patch_mean"` or the labels of a metadata field, what methods that need a whole layer or fold read; the big blocks are refused, they are memory-mapped so that they are never loaded whole), and `__getitem__(i)` (the only way to read the big blocks, in batches)
+returns one example as `{"image", "cls", "patch_tokens", "patch_mean", "labels"}`, always with these keys in this order: `cls`, `patch_mean` (both `(C,)`) and `labels` (`{metadata field: integer}`) are always filled, while
+`image` and `patch_tokens` are only opened when enabled in the constructor (`ActivationDataset(data_dir, layer, device, patch_tokens=True, image=True)`) and are an empty tensor `torch.empty(0)` otherwise (empty means "not loaded").
+`.labels` (all labels, CPU tensors, for host-side work like the folds and the briefing) and `.label_names` are attributes, and so are the facts the dataset advertises so that methods never hard-code them: `.num_examples`, `.channel_dim` (the length of every vector) and `.vector_types` (`{vector type: description}` of the vectors every item holds). `dataset[i]` is one example, `dataset[indices]` or `dataset[:]` (like any tensor index) several at once. For batch iteration a default `DataLoader` batches the items, with a `Subset` to select examples (keep its `num_workers` at 0: the items are GPU tensors and workers cannot use the GPU).
 
-An existing `data/<hash>/` directory is reused without re-extracting. If a run died, its `metadata.json` is missing and
+An existing `data/<hash>/` directory is reused without re-extracting. If a run died, its `info.json` is missing and
 loading crashes: delete that `data/<hash>/` directory and rerun.
 
 ## Hook contract
@@ -166,7 +176,7 @@ Nothing else in the rig needs to change.
   `probe.dataset_roots`; `probe.py`'s loaders are the precedent), returns `(PIL image, metadata dict)` and exposes
   `records`, a list of `(image, metadata)` per sample (the sampler stratifies over `metadata[stratification_dimension]`);
   add it to `load_dataset` and a block under `datasets:` in the config.
-- New method: a class in its own file in `interpret/methods/`, `Method(layerwise_pooled_embeddings)` (or the dataset itself if it needs token-level data) with `run()`, which stores a nested dict of
+- New method: a class in its own file in `interpret/methods/`, `Method(datasets)` (`Method(datasets, device)` if it builds its own modules, like the probe's head; `datasets` is `{layer name: ActivationDataset}`; enable `patch_tokens` or `image` on a dataset if the method needs token-level data or images) with `run()`, which stores a nested dict of
   plain numbers in `self.results`, and `plot()`, which returns `{file name: matplotlib Figure}` built from `self.results`
   (`main()` saves the figures); add it to the dispatch in `main()` and an entry in `methods` in the config (a method with tunables gets its own config sub-block, passed to its constructor in the dispatch), and a subsection under
   Methods here (the papers behind it, the questions it answers, notes on the implementation).
