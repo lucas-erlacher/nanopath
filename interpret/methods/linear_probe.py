@@ -11,6 +11,7 @@
 #  why no loss balancing in evaluation: the weights correct what the probe learns i.e. balancing is central to training - balancing is not essential for validation loss computation i.e. we prefer to have an undistorted performance picture in evaluation.
 
 import math
+import time
 from collections import Counter
 
 import numpy as np
@@ -163,7 +164,7 @@ class LinearProbe:
                         grid[self._setting_name(lr, weight_decay)] = {"folds": [], "curves": {"train_loss": [], "val_loss": []}}
 
                 # train all folds for all grid positions
-                for train_indices, val_indices in self.folds[target]:
+                for fold, (train_indices, val_indices) in enumerate(self.folds[target]):
                     # data preprocessing (standardization): 
                     # improves the conditioning number of the embedding cloud (the ratio of its largest to its smallest singular value) i.e. it 
                     # homogenizes the spread of the cloud, which makes the optimization process easier. this matters especially in our context: 
@@ -186,7 +187,9 @@ class LinearProbe:
                     # train the current fold for each grid position
                     for lr in self._cfg["lrs"]:  # grid axis 1
                         for weight_decay in self._cfg["weight_decays"]:  # grid axis 2
+                            start_time = time.perf_counter()
                             metrics, train_losses, val_losses = self.fit(target, dataset, train_indices, val_indices, mean, std, class_weights, lr, weight_decay)
+                            tqdm.write(f"{target} | {layer_name} | fold {fold} | {self._setting_name(lr, weight_decay)}: trained in {time.perf_counter() - start_time:.1f} s (balanced accuracy {metrics['balanced_accuracy']:.3f})")
                             # store results
                             entry = grid[self._setting_name(lr, weight_decay)]
                             entry["folds"].append(metrics)
