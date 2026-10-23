@@ -194,7 +194,7 @@ class ActivationDataset(torch.utils.data.Dataset):
     # a whole small block of this layer on the device: "cls", "patch_mean" or the labels of a metadata field. The big blocks (`patch_tokens`, `image`) are deliberately not available here: they are memory-mapped
     # so that they are never loaded whole, and are only read in batches through __getitem__
     def get_block(self, name):
-        assert name in self.vector_types or name in self.labels, f"'{name}' is not a small block, the big blocks are only read in batches through __getitem__"
+        assert name not in ("patch_tokens", "image"), f"'{name}' is a big block: it is memory-mapped so that it is never loaded whole, so it can only be read in batches through __getitem__"
         block = self.activations[name] if name in self.vector_types else self.labels[name]
         return block.to(self.device)
 
