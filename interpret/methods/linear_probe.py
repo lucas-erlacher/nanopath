@@ -39,7 +39,7 @@ class LinearProbe:
 
         # the labels (integers) and their names are the same in the dataset of every layer, so the first one gives them all
         first_dataset = list(datasets.values())[0]
-        self.labels = first_dataset.labels  
+        self.labels = first_dataset.get_block("labels", to_device=False)  # all labels, they stay on the CPU: the folds (sklearn) and the briefing work on the host
         self.label_names = first_dataset.label_names  
         group_ids = self.labels[self._cfg["leakage_group"]].numpy()
 
@@ -50,7 +50,7 @@ class LinearProbe:
         for target in self._cfg["targets"]:
             splitter = StratifiedGroupKFold(n_splits=self._cfg["folds"], shuffle=True, random_state=seed)
             self.folds[target] = []
-            for train_indices, val_indices in splitter.split(list(range(first_dataset.num_examples)), self.labels[target].numpy(), groups=group_ids):
+            for train_indices, val_indices in splitter.split(list(range(len(first_dataset))), self.labels[target].numpy(), groups=group_ids):
                 self.folds[target].append((train_indices.tolist(), val_indices.tolist()))
 
         self.briefing = self.print_briefing(first_dataset)
@@ -174,8 +174,8 @@ class LinearProbe:
                     # we use the same fixed set of learning rates for every layer, but the embedding clouds after different layers can have vastly different scales and geometryies,
                     # so homogenization is key to one set of of learning rates being meaningful across layers (else we would have to tune them per-layer).
                     # load the whole training fold at once (the rows of the whole blocks), for the statistics and the class weights
-                    train_inputs = torch.cat([dataset.get_block("cls")[train_indices], dataset.get_block("patch_mean")[train_indices]], dim=1)
-                    train_labels = dataset.get_block(target)[train_indices]
+                    train_inputs = torch.cat([dataset.get_block("activations", "cls")[train_indices], dataset.get_block("activations", "patch_mean")[train_indices]], dim=1)
+                    train_labels = dataset.get_block("labels", target)[train_indices]
                     mean = train_inputs.mean(dim=0)
                     std = train_inputs.std(dim=0)
                     # DATA LEAKAGE PREVENTION
@@ -227,7 +227,7 @@ class LinearProbe:
     # Returns the same numbers as a dict, which is saved in the results.
     def print_briefing(self, first_dataset):
         num_grid_points = len(self._cfg["lrs"]) * len(self._cfg["weight_decays"])
-        input_dim = 2 * first_dataset.channel_dim  # [CLS, patch mean]
+        input_dim = 2 * first_dataset.get_block("activations", "cls").shape[1]  # [CLS, patch mean]
         group_field = self._cfg["leakage_group"]
         group_names = self.label_names[group_field]
 
@@ -239,7 +239,7 @@ class LinearProbe:
 
         lines = ["LINEAR PROBE: run briefing", "", "PLAN"]
         lines.append(f"targets: {', '.join(self._cfg['targets'])} | layers: {', '.join(self.layer_names)} | input: [CLS, patch mean], {input_dim} values")
-        lines.append(f"examples: {first_dataset.num_examples} tiles in {len(group_names)} groups of {self._cfg['leakage_group']} | folds: {self._cfg['folds']} per target (StratifiedGroupKFold on {self._cfg['leakage_group']}, stratified on the target, seed {self.seed})")
+        lines.append(f"examples: {len(first_dataset)} tiles in {len(group_names)} groups of {self._cfg['leakage_group']} | folds: {self._cfg['folds']} per target (StratifiedGroupKFold on {self._cfg['leakage_group']}, stratified on the target, seed {self.seed})")
         lines.append(f"grid: {len(self._cfg['lrs'])} learning rates x {len(self._cfg['weight_decays'])} weight decays = {num_grid_points} settings | {self._cfg['epochs']} epochs, batch size {self._cfg['batch_size']}")
         lines.append(f"total: {num_trainings} trainings, about {total_steps / 1e6:.1f} M optimizer steps")
         lines.append("")
@@ -279,7 +279,7 @@ class LinearProbe:
         lines.append("FEATURE SCALE (before standardization)")
         feature_scale = {}
         for layer_name, dataset in self._datasets.items():
-            inputs = torch.cat([dataset.get_block("cls"), dataset.get_block("patch_mean")], dim=1)  # the whole layer at once, [CLS, patch mean] like in prepare_batch
+            inputs = torch.cat([dataset.get_block("activations", "cls"), dataset.get_block("activations", "patch_mean")], dim=1)  # the whole layer at once, [CLS, patch mean] like in prepare_batch
             norms = inputs.norm(dim=1)
             constant_features = int((inputs.std(dim=0) == 0).sum().item())
             feature_scale[layer_name] = {"norm_mean": norms.mean().item(), "norm_std": norms.std().item(), "constant_features": constant_features}

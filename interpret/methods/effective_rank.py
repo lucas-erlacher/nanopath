@@ -19,7 +19,7 @@ class EffectiveRank:
             results[vector_type] = {}
 
             for layer_name, dataset in tqdm(self._datasets.items(), desc=f"Effective rank ({vector_type})"):  # iterate over layers, first to last
-                features = dataset.get_block(vector_type)  # (n, C), one row per example (the whole layer, on the device)
+                features = dataset.get_block("activations", vector_type)  # (n, C), one row per example (the whole layer, on the device)
 
                 # center the embedding cloud (PCA-style) so the singular values describe the variation within it, not its offset from the origin
                 features = features - features.mean(dim=0, keepdim=True)

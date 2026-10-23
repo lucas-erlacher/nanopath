@@ -17,7 +17,7 @@ class CKA:
         # for two balanced classes), so the subset stays close to stratified, especially at large max_samples.
         first_dataset = list(datasets.values())[0]  # the datasets of all layers advertise the same number of examples and vector types
         self.vector_types = first_dataset.vector_types  # {vector type: description}
-        permutation = torch.randperm(first_dataset.num_examples, generator=torch.Generator().manual_seed(seed))
+        permutation = torch.randperm(len(first_dataset), generator=torch.Generator().manual_seed(seed))
         self.sampled_indices = permutation[:method_cfg["max_samples"]].tolist()
         self.results = None  # {vector type: {layer a: {layer b: CKA}}}, set by run()
 
@@ -30,7 +30,7 @@ class CKA:
 
             # compute the similarity structure tables for each layer (and perform a precomputation for step 6)
             for layer_name, dataset in tqdm(self._datasets.items(), desc=f"build similarity structure tables ({vector_type})"):  # iterate over layers, first to last
-                all_features = dataset.get_block(vector_type)  # (N, C), one row per example (the whole layer, on the device)
+                all_features = dataset.get_block("activations", vector_type)  # (N, C), one row per example (the whole layer, on the device)
                 features = all_features[self.sampled_indices]  # (n, C), one row per sampled example
                 num_examples = features.shape[0]
 

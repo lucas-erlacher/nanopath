@@ -167,50 +167,52 @@ def extract_activations(model, dataset, transform, settings, extract_cfg, output
 # -------------------------------------------------------------------------------------------------
 
 # One layer of an extraction (layout in README.md): row i of every file is the i-th sampled tile. The constructor sends nothing to `device`: the tensors are CPU tensors in memory
-# (the big files `patch_tokens` and `image` are memory-mapped and only opened when enabled), and the two ways out, get_block (a whole block) and __getitem__ (examples), are the only places that move data to the device
-# (keep DataLoader's num_workers at 0, workers cannot use the GPU). A part that is not enabled is an empty tensor, so items always have the same keys.
+# (the big files `patch_tokens` and `image` are memory-mapped and only opened when enabled), all of them are private, and the two ways out, get_block (a whole small block) and __getitem__ (examples), are the only
+# places that move data to the device (keep DataLoader's num_workers at 0, workers cannot use the GPU). A part that is not enabled is an empty tensor, so items always have the same keys.
+# Only two facts are public: label_names and vector_types.
 class ActivationDataset(torch.utils.data.Dataset):
     def __init__(self, data_dir, layer_name, device, patch_tokens=False, image=False):
         data_dir = Path(data_dir)
-        self.device = device
+        self._device = device
         # load data that the dataset spans
         # the activations of this layer for every example: the vectors, (N, C) each, are in memory, the big patch tokens, (N, 256, C), are memory-mapped and None unless enabled
-        self.activations = {
+        self._activations = {
             "cls": torch.load(data_dir / "activations" / f"{layer_name}_cls.pt"),
             "patch_tokens": torch.load(data_dir / "activations" / f"{layer_name}_patch_tokens.pt", mmap=True) if patch_tokens else None,
             "patch_mean": torch.load(data_dir / "precomputed" / f"{layer_name}_patch_mean.pt"),
         }
-        self.images = torch.load(data_dir / "images.pt", mmap=True) if image else None  # (N, 3, H, W)
-        self.labels = torch.load(data_dir / "labels.pt")  # e.g. {"medical_center": tensor([0, 1, 1, 0, ...])} - each tensor holds one integer per datapoint (int representation of metadata strings)
+        self._images = torch.load(data_dir / "images.pt", mmap=True) if image else None  # (N, 3, H, W)
+        self._labels = torch.load(data_dir / "labels.pt")  # e.g. {"medical_center": tensor([0, 1, 1, 0, ...])} - each tensor holds one integer per datapoint (int representation of metadata strings)
+        # the two public facts
         self.label_names = json.loads((data_dir / "label_names.json").read_text())  # e.g. {"medical_center": ["center_a", "center_b"]} - this maps the integers back to human readable strings
-        # what the dataset advertises about its data
-        self.num_examples = len(self.activations["cls"])  # the number of extracted tiles
-        self.channel_dim = self.activations["cls"].shape[1]  # the length of every vector (cls, patch mean and each patch token)
         self.vector_types = {"cls": "CLS token", "patch_mean": "mean over the patch tokens"}  # the vectors every item holds, with a description for titles
 
     def __len__(self):
-        return self.num_examples
+        return len(self._activations["cls"])
 
-    # a whole small block of this layer on the device: "cls", "patch_mean" or the labels of a metadata field. The big blocks (`patch_tokens`, `image`) are deliberately not available here: they are memory-mapped
-    # so that they are never loaded whole, and are only read in batches through __getitem__
-    def get_block(self, name):
-        assert name not in ("patch_tokens", "image"), f"'{name}' is a big block: it is memory-mapped so that it is never loaded whole, so it can only be read in batches through __getitem__"
-        block = self.activations[name] if name in self.vector_types else self.labels[name]
-        return block.to(self.device)
+    # a whole small block of this layer on the device: `field` names a dict of this class ("activations" or "labels") and `key` picks the block in it, e.g. get_block("activations", "cls") or get_block("labels", "medical_center");
+    # without a key the whole dict is returned, which only exists for the labels (get_block("labels", to_device=False), a dict has no device move).
+    # The big blocks (`patch_tokens`, `images`) are deliberately not available here: they are memory-mapped so that they are never loaded whole, and are only read in batches through __getitem__.
+    # to_device=False skips the device move, for the few callers that work on the host (sklearn and printouts).
+    def get_block(self, field, key=None, to_device=True):
+        assert field != "images" and key != "patch_tokens" and (field, key) != ("activations", None), f"'{field}' / '{key}' includes a big block: it is memory-mapped so that it is never loaded whole, so it can only be read in batches through __getitem__"
+        block = getattr(self, f"_{field}")
+        if key is not None:
+            block = block[key]
+        return block.to(self._device) if to_device else block
 
     # one example (this is what DataLoader and Subset fetch); every returned tensor goes through .to(device)
     def __getitem__(self, i):
         not_loaded = torch.empty(0)
-        image = self.images[i] if self.images is not None else not_loaded
-        patch_tokens = self.activations["patch_tokens"][i] if self.activations["patch_tokens"] is not None else not_loaded
+        image = self._images[i] if self._images is not None else not_loaded
+        patch_tokens = self._activations["patch_tokens"][i] if self._activations["patch_tokens"] is not None else not_loaded
         return {
-            "image": image.to(self.device),
-            "cls": self.activations["cls"][i].to(self.device),
-            "patch_tokens": patch_tokens.to(self.device),
-            "patch_mean": self.activations["patch_mean"][i].to(self.device),
-            "labels": {field: values[i].to(self.device) for field, values in self.labels.items()},
+            "image": image.to(self._device),
+            "cls": self._activations["cls"][i].to(self._device),
+            "patch_tokens": patch_tokens.to(self._device),
+            "patch_mean": self._activations["patch_mean"][i].to(self._device),
+            "labels": {field: values[i].to(self._device) for field, values in self._labels.items()},
         }
-
 
 # -------------------------------------------------------------------------------------------------
 # MAIN
