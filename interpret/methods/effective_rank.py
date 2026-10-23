@@ -7,18 +7,17 @@ from tqdm import tqdm
 
 class EffectiveRank:
     def __init__(self, layerwise_pooled_embeddings):
-        self.layerwise_pooled_embeddings = layerwise_pooled_embeddings  # see LayerwisePooledEmbeddings in interpret.py
+        self._pooled = layerwise_pooled_embeddings  # see LayerwisePooledEmbeddings in interpret.py
         self.results = None  # {vector type: {layer: effective rank}}, set by run()
 
     def run(self):
         # One effective rank value per (vector type, layer): results[vector type][layer]
         results = {}
-        pooled = self.layerwise_pooled_embeddings
-        for vector_type, records_by_layer in pooled.records.items():  # iterate over vector types (patch_mean, cls)
+        for vector_type, records_by_layer in self._pooled.records.items():  # iterate over vector types (patch_mean, cls)
             results[vector_type] = {}
 
             for layer_name in tqdm(records_by_layer, desc=f"Effective rank ({vector_type})"):  # iterate over layers, first to last
-                features = pooled.stack(vector_type, layer_name, range(pooled.num_examples))  # (n, C), one row per example
+                features = self._pooled.stack(vector_type, layer_name, range(self._pooled.num_examples))  # (n, C), one row per example
 
                 # center the embedding cloud (PCA-style) so the singular values describe the variation within it, not its offset from the origin
                 features = features - features.mean(dim=0, keepdim=True)

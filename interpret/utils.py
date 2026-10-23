@@ -48,11 +48,18 @@ def write_dashboard(results_dir, data_dir, cfg):
     body += f"<details><summary>full config</summary><pre>{html.escape(json.dumps(cfg, indent=2))}</pre></details>"
 
     for name in icfg["methods"]:
-        body += f"<section class='card'><h2>{name}</h2><div class='plots'>"
+        headline_plots = ""
+        debug_plots = ""
         for plot_path in sorted((results_dir / name).glob("*.png")):
             encoded = base64.b64encode(plot_path.read_bytes()).decode()
-            body += f"<img src='data:image/png;base64,{encoded}' alt='{plot_path.stem}'>"
-        body += "</div>"
+            image = f"<img src='data:image/png;base64,{encoded}' alt='{plot_path.stem}'>"
+            if plot_path.name.startswith("debug_"):  # the debugging plots of a method are folded away
+                debug_plots += image
+            else:
+                headline_plots += image
+        body += f"<section class='card'><h2>{name}</h2><div class='plots'>{headline_plots}</div>"
+        if debug_plots != "":
+            body += f"<details><summary>debug plots</summary><div class='plots'>{debug_plots}</div></details>"
 
         # this method's subsection of README.md, split at the lines that start one of its parts
         method_text = re.search(rf"^### {name}\n(.*?)(?=^##|\Z)", readme, re.S | re.M).group(1)

@@ -68,6 +68,17 @@ Ultimately, the normalized inner product of the centered similarity tables is **
 
 *sidenote.* The paper also gives a cheaper form for the linear kernel (regroup the sum by feature: `CKA = ‖YcᵀXc‖²_F / (‖XcᵀXc‖_F · ‖YcᵀYc‖_F)` with `Xc = HX`, `Yc = HY`, which needs only C × C matrices instead of n × n tables; Section 3 and Table 1 of the paper). We omit it: at our sample sizes the n × n version is still tractable, and we want to focus on methods, not on computational tricks - unless we have a good reason to read about and implement it (in which case we will do so in the future).
 
+### linear_probe
+
+Question this method answers: at which depth can a linear probe on the `[CLS, patch mean]` embedding of a layer decode tissue class (`biological_class`) and site/stain information (`medical_center`)?
+
+Notes on the implementation:
+- The score measures linear decodability: what a linear layer can read out of the embedding, not whether the model uses that information.
+- Leakage is controlled by the folds: `StratifiedGroupKFold` on the `leakage_group` metadata field (`slide_id` in our config) keeps every group on one side of a split, the folds are computed once per target and used for every layer and grid point of that target (so the layers are compared on the same folds), and the standardization statistics come from the training fold only. There is no patient ID in the metadata, so patient-level leakage cannot be excluded.
+- The best grid point per layer is picked by balanced accuracy on the same folds that are reported, which is slightly optimistic, equally for every layer. The other metrics (macro-F1 and macro one-vs-rest AUROC) are taken at that grid point.
+- Class and center may be correlated in this data, so a high score for `biological_class` may partly come from center-specific stain cues. Class imbalance is handled in the training loss only: every class is weighted by n / (K * its count in the training fold), so with balanced classes the weights are about 1 and nothing changes. Class balancing happens in two independent places that do not stand in for each other: the split gives every fold about the same class mix (the folds of a target are stratified on that target's labels; a best-effort secondary objective, because leakage prevention, no group split across train and validation, is primary and always wins, and whole groups move together), and the loss weighting removes the skew the optimizer sees. The evaluation is unweighted (the validation loss, and balanced accuracy, macro-F1 and macro AUROC, which do not depend on class frequency), so the train and validation loss curves have different scales. The run briefing printed at the start (in an ASCII box) shows the class counts, a class-by-center table and the class distribution of every fold, so such problems are visible before the training.
+- Convergence is checked with the `debug_` plots (in a toggle on the dashboard): if the validation loss is still falling at the last epoch, the best score reflects the optimization limit and not only the information in the layer. All numbers, curves and fold memberships are in `results.json`.
+
 ## Config (`interpret:` in `configs/main.yaml`)
 
 - `checkpoint_path`, `model_weights` (the checkpoint key: `model_ema` for the teacher, `model` for the student): the model to analyse.
@@ -80,6 +91,7 @@ Ultimately, the normalized inner product of the centered similarity tables is **
 - `extract.{num_samples, batch_size, num_workers, chunk_size, layer_stride}`: `layer_stride` keeps every n-th
   layer counted from the last (the last is always kept); `num_workers` only parallelizes image decoding.
 - `methods`: the methods to run (`effective_rank`, `cka`); `cka.max_samples` caps the examples CKA uses (a seeded random subset, label-free so not exactly stratified), because its similarity tables are n × n (0.1 GB each at 5,000 examples, 0.4 GB at 10,000, 2.5 GB at 25,000); the other methods use all extracted examples.
+- `linear_probe`: `targets` (metadata fields to predict), `lrs` and `weight_decays` (the grid), `epochs`, `batch_size`, `leakage_group` (the metadata field whose values are never split across train and validation, `slide_id` for PathoROB) and `folds` (a `StratifiedGroupKFold` on that field).
 
 Storage per sample is `kept_layers x 257 tokens x C x 4 bytes` (float32) plus the 0.6 MB input image; for ViT-S (C=384)
 that is about 3.4 MB at stride 2 and 2.2 MB at stride 4, so a 500-sample chunk is 1.7 GB / 1.1 GB.

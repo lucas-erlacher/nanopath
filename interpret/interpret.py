@@ -23,6 +23,7 @@ from interpret.utils import write_dashboard
 os.environ["MPLBACKEND"] = "agg"
 from interpret.methods.effective_rank import EffectiveRank
 from interpret.methods.cka import CKA
+from interpret.methods.linear_probe import LinearProbe
 
 
 # -------------------------------------------------------------------------------------------------
@@ -175,8 +176,8 @@ class ChunkedFeatureDataset(torch.utils.data.Dataset):
 
 # the layer-wise pooled embeddings of all examples: records[vector type][layer] is a list with one record per example, {"embedding": (C,) vector, "metadata": the metadata dict of that
 # example}, for the mean over the patch tokens ("patch_mean") and the CLS token ("cls"). every record of an example points to the same metadata dict (a reference, never copied or
-# mutated), so an embedding always carries the metadata of its own forward pass. built once in main() (it reads every chunk) and shared by the methods; stack() turns the records
-# at the given example indices of one layer into an (n, C) matrix, one row per index.
+# mutated), so an embedding always carries the metadata of its own forward pass (hard mapping that cannot drift). built once in main() (it reads every chunk) and shared by the methods; 
+# stack() turns the records at the given example indices of one layer into an (n, C) matrix, one row per index.
 class LayerwisePooledEmbeddings:
     def __init__(self, chunked_dataset):
         self.num_examples = len(chunked_dataset)
@@ -296,6 +297,8 @@ def main():
             method = EffectiveRank(layerwise_pooled_embeddings)
         elif name == "cka":
             method = CKA(layerwise_pooled_embeddings, icfg["seed"], icfg[name])
+        elif name == "linear_probe":
+            method = LinearProbe(layerwise_pooled_embeddings, icfg["seed"], icfg[name])
         else:
             raise KeyError(f"Unknown method '{name}'; add it to the method dispatch in main() of interpret/interpret.py")
         method.run()
@@ -307,9 +310,7 @@ def main():
         for plot_name, figure in method.plot().items():
             figure.savefig(plot_dir / f"{plot_name}.png", bbox_inches="tight")
 
-    results_json = json.dumps(results, indent=2)
-    (results_dir / "results.json").write_text(results_json)
-    print(results_json)
+    (results_dir / "results.json").write_text(json.dumps(results, indent=2))
 
     write_dashboard(results_dir, data_dir, cfg)
     print(f"dashboard saved to: {results_dir / 'dashboard.html'}")
