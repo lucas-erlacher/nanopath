@@ -138,5 +138,6 @@ interpret:
     weight_decays: [0.0] # DEBUG, a real run: [0.0, 1.0e-4, 1.0e-3]
     epochs: 3 # DEBUG, a real run: 200
     batch_size: 512
+    num_workers: 4 # DataLoader worker processes that fetch the batches of the probe in parallel (CPU cores minus 1)
     leakage_group: slide_id  # metadata field whose values are never split across train and validation 
     folds: 4 

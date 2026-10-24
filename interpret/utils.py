@@ -10,8 +10,8 @@ from pathlib import Path
 import markdown
 
 # Style of the dashboard: the browser's own light/dark colors, a readable column, plots side by side.
-# TIMING (debug): seconds spent in the dataset's loader path (summed over examples and batches), read and reset by the probe after every training
-TIMINGS = {"getitem tensors": 0.0, "getitem labels": 0.0, "collate": 0.0, "device move": 0.0}
+# TIMING (debug): seconds spent in the dataset's loader path (summed over examples and batches), read and reset by the probe after every training; the getitem parts run in the workers, so they only add up with num_workers 0
+TIMINGS = {"getitem tensors": 0.0, "getitem labels": 0.0, "device move": 0.0}
 
 STYLE = """
 :root { color-scheme: light dark; }
@@ -35,6 +35,7 @@ pre { overflow-x: auto; }
 # standardizes (vectorized). 
 def standardize(inputs, mean, std):
     return (inputs - mean) / std
+
 
 
 # Writes results_dir/dashboard.html, to open with a double click: the settings of the run, then one section per method with its plots (embedded in the file,

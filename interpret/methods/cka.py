@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 class CKA:
     def __init__(self, datasets, seed, method_cfg):
-        self._datasets = datasets  # {layer name: ActivationDataset}, see interpret.py
+        self._datasets = datasets  # {layer name: ActivationDataset}, see data.py
 
         # the n x n tables may need more RAM than the data allows, so keep a random subset of at most max_samples examples (label-free, so not exactly stratified).
         # it is drawn once, so every layer keeps the same examples.

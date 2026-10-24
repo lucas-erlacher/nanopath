@@ -23,6 +23,7 @@ from sklearn.metrics import balanced_accuracy_score, f1_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
 from tqdm import tqdm
 
+from interpret.data import DeviceLoader
 from interpret.utils import standardize, TIMINGS
 
 METRICS = ("balanced_accuracy", "macro_f1", "macro_auroc")  # the first one selects the best grid point
@@ -30,7 +31,7 @@ METRICS = ("balanced_accuracy", "macro_f1", "macro_auroc")  # the first one sele
 
 class LinearProbe:
     def __init__(self, datasets, device, seed, method_cfg):
-        self._datasets = datasets  # {layer name: ActivationDataset}, see interpret.py
+        self._datasets = datasets  # {layer name: ActivationDataset}, see data.py
         self.device = device  # where the linear head lives (the datasets already hand out tensors on it)
         self.seed = seed
         self._cfg = method_cfg
@@ -75,8 +76,8 @@ class LinearProbe:
     def fit(self, target, dataset, train_indices, val_indices, mean, std, class_weights, lr, weight_decay):
         torch.manual_seed(self.seed)  # reseeded for every (fold, grid point), so a training does not depend on the loop order
         generator = torch.Generator().manual_seed(self.seed)
-        train_loader = dataset.loader(train_indices, self._cfg["batch_size"], shuffle=True, generator=generator)  # the training examples in a new random order every epoch, batches already on the device
-        val_loader = dataset.loader(val_indices, self._cfg["batch_size"])
+        train_loader = DeviceLoader(dataset, self.device, train_indices, self._cfg["batch_size"], shuffle=True, generator=generator, num_workers=self._cfg["num_workers"])  # the training examples in a new random order every epoch, batches already on the device
+        val_loader = DeviceLoader(dataset, self.device, val_indices, self._cfg["batch_size"], num_workers=self._cfg["num_workers"])
 
         # create probing layer
         num_classes = len(class_weights)

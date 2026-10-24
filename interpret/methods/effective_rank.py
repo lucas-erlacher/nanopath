@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 class EffectiveRank:
     def __init__(self, datasets):
-        self._datasets = datasets  # {layer name: ActivationDataset}, see interpret.py
+        self._datasets = datasets  # {layer name: ActivationDataset}, see data.py
         first_dataset = list(datasets.values())[0]
         self.vector_types = first_dataset.vector_types  # {vector type: description}, advertised by the datasets (the same in every layer)
         self.results = None  # {vector type: {layer: effective rank}}, set by run()

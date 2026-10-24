@@ -5,7 +5,6 @@ import math
 import random
 import json
 import hashlib
-import time
 import subprocess
 import yaml
 import numpy as np
@@ -18,7 +17,8 @@ from pathlib import Path
 from model import ViT
 from probe import worker_probe_transforms
 from interpret.datasets import load_dataset
-from interpret.utils import write_dashboard, TIMINGS
+from interpret.data import ActivationDataset
+from interpret.utils import write_dashboard
 
 # Headless plotting (figures are only saved to files): Colab exports MPLBACKEND=<notebook backend>, which is not installed in the venv.
 os.environ["MPLBACKEND"] = "agg"
@@ -161,84 +161,6 @@ def extract_activations(model, dataset, transform, settings, extract_cfg, output
         "sampled_dataset_indices": sampled_indices,
     }
     (output_dir / "info.json").write_text(json.dumps(info))
-
-
-# -------------------------------------------------------------------------------------------------
-# DATASET
-# -------------------------------------------------------------------------------------------------
-
-# One layer of an extraction (layout in README.md): row i of every file is the i-th sampled tile. The constructor sends nothing to `device`: the tensors are CPU tensors in memory
-# (the big files `patch_tokens` and `image` are memory-mapped and only opened when enabled), all of them are private, and the two ways out, get_block (a whole small block) and loader (batches), are the only
-# places that move data to the device; __getitem__ returns one example as CPU tensors. A part that is not enabled is an empty tensor, so items always have the same keys.
-# Only two facts are public: label_names and vector_types.
-class ActivationDataset(torch.utils.data.Dataset):
-    def __init__(self, data_dir, layer_name, device, patch_tokens=False, image=False):
-        data_dir = Path(data_dir)
-        self._device = device
-        # load data that the dataset spans
-        # the activations of this layer for every example: the vectors, (N, C) each, are in memory, the big patch tokens, (N, 256, C), are memory-mapped and None unless enabled
-        self._activations = {
-            "cls": torch.load(data_dir / "activations" / f"{layer_name}_cls.pt"),
-            "patch_tokens": torch.load(data_dir / "activations" / f"{layer_name}_patch_tokens.pt", mmap=True) if patch_tokens else None,
-            "patch_mean": torch.load(data_dir / "precomputed" / f"{layer_name}_patch_mean.pt"),
-        }
-        self._images = torch.load(data_dir / "images.pt", mmap=True) if image else None  # (N, 3, H, W)
-        self._labels = torch.load(data_dir / "labels.pt")  # e.g. {"medical_center": tensor([0, 1, 1, 0, ...])} - each tensor holds one integer per datapoint (int representation of metadata strings)
-        # the two public facts
-        self.label_names = json.loads((data_dir / "label_names.json").read_text())  # e.g. {"medical_center": ["center_a", "center_b"]} - this maps the integers back to human readable strings
-        self.vector_types = {"cls": "CLS token", "patch_mean": "mean over the patch tokens"}  # the vectors every item holds, with a description for titles
-
-    def __len__(self):
-        return len(self._activations["cls"])
-
-    # a whole small block of this layer on the device: `field` names a dict of this class ("activations" or "labels") and `key` picks the block in it, e.g. get_block("activations", "cls") or get_block("labels", "medical_center");
-    # without a key the whole dict is returned, which only exists for the labels (get_block("labels", to_device=False), a dict has no device move).
-    # The big blocks (`patch_tokens`, `images`) are deliberately not available here: they are memory-mapped so that they are never loaded whole, and are only read in batches through loader.
-    # to_device=False skips the device move, for the few callers that work on the host (sklearn and printouts).
-    def get_block(self, field, key=None, to_device=True):
-        assert field != "images" and key != "patch_tokens" and (field, key) != ("activations", None), f"'{field}' / '{key}' includes a big block: it is memory-mapped so that it is never loaded whole, so it can only be read in batches through loader"
-        block = getattr(self, f"_{field}")
-        if key is not None:
-            block = block[key]
-        return block.to(self._device) if to_device else block
-
-    # one example as CPU tensors (this is what DataLoader and Subset fetch); the device move happens per batch in loader, not per example here
-    def __getitem__(self, i):
-        t = time.perf_counter()  # TIMING
-        not_loaded = torch.empty(0)
-        image = self._images[i] if self._images is not None else not_loaded
-        patch_tokens = self._activations["patch_tokens"][i] if self._activations["patch_tokens"] is not None else not_loaded
-        item = {
-            "image": image,
-            "cls": self._activations["cls"][i],
-            "patch_tokens": patch_tokens,
-            "patch_mean": self._activations["patch_mean"][i],
-        }
-        TIMINGS["getitem tensors"] += time.perf_counter() - t  # TIMING
-        t = time.perf_counter()  # TIMING
-        item["labels"] = {field: values[i] for field, values in self._labels.items()}
-        TIMINGS["getitem labels"] += time.perf_counter() - t  # TIMING
-        return item
-
-    # a DataLoader over the examples at `indices` that yields batches already on the device (_collate_to_device below); it is the one way to read the big blocks, in batches.
-    # The device comes from this dataset (main() passes it to the constructor), so no consumer needs to know it.
-    def loader(self, indices, batch_size, shuffle=False, generator=None):
-        # a Subset is a lazy view of the examples: it only holds the dataset and the indices (no data is copied or loaded), and reads an example from the dataset when it is fetched
-        subset = torch.utils.data.Subset(self, indices)
-        return torch.utils.data.DataLoader(subset, batch_size=batch_size, shuffle=shuffle, generator=generator, collate_fn=self._collate_to_device)
-
-    # The one place that moves batches to the device (one copy per tensor per batch instead of per example which is slow); num_workers must stay 0 because collate runs in the main process and workers cannot use the GPU.
-    def _collate_to_device(self, samples):
-        t = time.perf_counter()  # TIMING
-        batch = torch.utils.data.default_collate(samples)
-        TIMINGS["collate"] += time.perf_counter() - t  # TIMING
-        t = time.perf_counter()  # TIMING
-        # the batch is a nested dict (labels is a dict inside it), and tree_map applies the function to every tensor at any depth, so one call moves all of it
-        batch = torch.utils._pytree.tree_map(lambda tensor: tensor.to(self._device), batch)
-        torch.cuda.synchronize()  # TIMING
-        TIMINGS["device move"] += time.perf_counter() - t  # TIMING
-        return batch
-
 
 
 # -------------------------------------------------------------------------------------------------
