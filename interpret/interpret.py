@@ -220,34 +220,24 @@ class ActivationDataset(torch.utils.data.Dataset):
         TIMINGS["getitem labels"] += time.perf_counter() - t  # TIMING
         return item
 
-    # batches of the examples at `indices`, already on the device (see DeviceLoader below); it is the one way to read the big blocks, in batches. num_workers worker processes fetch and stack the examples on the CPU in parallel.
+    # a DataLoader over the examples at `indices` that yields batches already on the device (_collate_to_device below); it is the one way to read the big blocks, in batches.
     # The device comes from this dataset (main() passes it to the constructor), so no consumer needs to know it.
-    def loader(self, indices, batch_size, shuffle=False, generator=None, num_workers=0):
+    def loader(self, indices, batch_size, shuffle=False, generator=None):
         # a Subset is a lazy view of the examples: it only holds the dataset and the indices (no data is copied or loaded), and reads an example from the dataset when it is fetched
         subset = torch.utils.data.Subset(self, indices)
-        # "fork" as in the extraction: Python 3.14 defaults to "forkserver", which pickles the dataset to every worker; persistent workers survive between epochs
-        loader = torch.utils.data.DataLoader(
-            subset, batch_size=batch_size, shuffle=shuffle, generator=generator,
-            num_workers=num_workers, persistent_workers=num_workers > 0, multiprocessing_context="fork" if num_workers > 0 else None,
-        )
-        return DeviceLoader(loader, self._device)
+        return torch.utils.data.DataLoader(subset, batch_size=batch_size, shuffle=shuffle, generator=generator, collate_fn=self._collate_to_device)
 
-
-# The one place that moves batches to the device: workers cannot use the GPU, so they stack the examples on the CPU and every batch is moved here, in the main process, with one copy per tensor
-# (instead of per example, which is slow). A class with an __iter__ and not a generator, so that the loader can be iterated once per epoch.
-class DeviceLoader:
-    def __init__(self, loader, device):
-        self._loader = loader
-        self._device = device
-
-    def __iter__(self):
-        for batch in self._loader:
-            t = time.perf_counter()  # TIMING
-            # the batch is a nested dict (labels is a dict inside it), and tree_map applies the function to every tensor at any depth, so one call moves all of it
-            batch = torch.utils._pytree.tree_map(lambda tensor: tensor.to(self._device), batch)
-            torch.cuda.synchronize()  # TIMING
-            TIMINGS["device move"] += time.perf_counter() - t  # TIMING
-            yield batch
+    # The one place that moves batches to the device (one copy per tensor per batch instead of per example which is slow); num_workers must stay 0 because collate runs in the main process and workers cannot use the GPU.
+    def _collate_to_device(self, samples):
+        t = time.perf_counter()  # TIMING
+        batch = torch.utils.data.default_collate(samples)
+        TIMINGS["collate"] += time.perf_counter() - t  # TIMING
+        t = time.perf_counter()  # TIMING
+        # the batch is a nested dict (labels is a dict inside it), and tree_map applies the function to every tensor at any depth, so one call moves all of it
+        batch = torch.utils._pytree.tree_map(lambda tensor: tensor.to(self._device), batch)
+        torch.cuda.synchronize()  # TIMING
+        TIMINGS["device move"] += time.perf_counter() - t  # TIMING
+        return batch
 
 
 

@@ -75,8 +75,8 @@ class LinearProbe:
     def fit(self, target, dataset, train_indices, val_indices, mean, std, class_weights, lr, weight_decay):
         torch.manual_seed(self.seed)  # reseeded for every (fold, grid point), so a training does not depend on the loop order
         generator = torch.Generator().manual_seed(self.seed)
-        train_loader = dataset.loader(train_indices, self._cfg["batch_size"], shuffle=True, generator=generator, num_workers=self._cfg["num_workers"])  # the training examples in a new random order every epoch, batches already on the device
-        val_loader = dataset.loader(val_indices, self._cfg["batch_size"], num_workers=self._cfg["num_workers"])
+        train_loader = dataset.loader(train_indices, self._cfg["batch_size"], shuffle=True, generator=generator)  # the training examples in a new random order every epoch, batches already on the device
+        val_loader = dataset.loader(val_indices, self._cfg["batch_size"])
 
         # create probing layer
         num_classes = len(class_weights)
