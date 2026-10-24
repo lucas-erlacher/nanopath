@@ -23,7 +23,7 @@ from sklearn.metrics import balanced_accuracy_score, f1_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
 from tqdm import tqdm
 
-from interpret.utils import standardize
+from interpret.utils import standardize, TIMINGS
 
 METRICS = ("balanced_accuracy", "macro_f1", "macro_auroc")  # the first one selects the best grid point
 
@@ -86,6 +86,8 @@ class LinearProbe:
 
         train_losses = []
         val_losses = []
+        for name in TIMINGS:  # TIMING
+            TIMINGS[name] = 0.0  # TIMING
         timings = {"train data": 0.0, "train step": 0.0, "val data": 0.0, "val step": 0.0, "metrics": 0.0}  # TIMING (debug): seconds waiting for batches (fetch, collate, device move) vs computing on them
         for epoch in range(self._cfg["epochs"]):
             # train epoch
@@ -164,6 +166,7 @@ class LinearProbe:
 
         timings["metrics"] = time.perf_counter() - t  # TIMING
         tqdm.write("    timings over " + str(self._cfg["epochs"]) + " epochs: " + ", ".join(f"{name} {seconds:.2f} s" for name, seconds in timings.items()))  # TIMING
+        tqdm.write("    loader breakdown (inside the data time of train and val together, which is " + f"{timings['train data'] + timings['val data']:.2f} s): " + ", ".join(f"{name} {seconds:.2f} s" for name, seconds in TIMINGS.items()))  # TIMING
         return metrics, train_losses, val_losses
 
     def run(self):
