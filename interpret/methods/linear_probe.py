@@ -86,10 +86,15 @@ class LinearProbe:
 
         train_losses = []
         val_losses = []
+        timings = {"train data": 0.0, "train step": 0.0, "val data": 0.0, "val step": 0.0, "metrics": 0.0}  # TIMING (debug): seconds waiting for batches (fetch, collate, device move) vs computing on them
         for epoch in range(self._cfg["epochs"]):
             # train epoch
             batch_losses = []
+            t = time.perf_counter()  # TIMING
             for batch in train_loader:
+                torch.cuda.synchronize()  # TIMING
+                timings["train data"] += time.perf_counter() - t  # TIMING
+                t = time.perf_counter()  # TIMING
                 inputs, targets = self.prepare_batch(batch, target)  # (batch, D), (batch,)
                 inputs = standardize(inputs, mean, std)
                 assert targets.shape == (len(inputs),)
@@ -103,6 +108,9 @@ class LinearProbe:
                 loss.backward()
                 optimizer.step()
                 batch_losses.append(loss.detach())
+                torch.cuda.synchronize()  # TIMING
+                timings["train step"] += time.perf_counter() - t  # TIMING
+                t = time.perf_counter()  # TIMING
             train_loss = torch.stack(batch_losses).mean()  # mean of the batch losses
             assert train_loss.shape == ()
             train_losses.append(train_loss.item())
@@ -112,7 +120,11 @@ class LinearProbe:
                 batch_losses = []
                 val_outputs = []  # collected for the metrics of the last epoch
                 val_targets = [] # collected for the metrics of the last epoch
+                t = time.perf_counter()  # TIMING
                 for batch in val_loader:
+                    torch.cuda.synchronize()  # TIMING
+                    timings["val data"] += time.perf_counter() - t  # TIMING
+                    t = time.perf_counter()  # TIMING
                     inputs, targets = self.prepare_batch(batch, target)  # (batch, D), (batch,)
                     inputs = standardize(inputs, mean, std)
                     assert targets.shape == (len(inputs),)
@@ -125,6 +137,9 @@ class LinearProbe:
                     batch_losses.append(loss)
                     val_outputs.append(outputs)
                     val_targets.append(targets)
+                    torch.cuda.synchronize()  # TIMING
+                    timings["val step"] += time.perf_counter() - t  # TIMING
+                    t = time.perf_counter()  # TIMING
                 val_loss = torch.stack(batch_losses).mean()  # mean of the batch losses
                 assert val_loss.shape == ()
                 val_outputs = torch.cat(val_outputs)  # (n_val, K)
@@ -132,6 +147,7 @@ class LinearProbe:
                 assert val_outputs.shape == (len(val_indices), num_classes)
             val_losses.append(val_loss.item())
 
+        t = time.perf_counter()  # TIMING
         # final evaluation: the head has not changed since the validation of the last epoch, so those outputs are the final outputs
         probabilities = torch.softmax(val_outputs, dim=1).cpu().numpy()
         y_true = val_targets.cpu().numpy()
@@ -146,6 +162,8 @@ class LinearProbe:
             "macro_auroc": roc_auc_score(np.eye(num_classes)[y_true], probabilities, average="macro"),
         }
 
+        timings["metrics"] = time.perf_counter() - t  # TIMING
+        tqdm.write("    timings over " + str(self._cfg["epochs"]) + " epochs: " + ", ".join(f"{name} {seconds:.2f} s" for name, seconds in timings.items()))  # TIMING
         return metrics, train_losses, val_losses
 
     def run(self):
@@ -170,6 +188,7 @@ class LinearProbe:
                     # homogenizes the spread of the cloud, which makes the optimization process easier. this matters especially in our context: 
                     # we use the same fixed set of learning rates for every layer, but the embedding clouds after different layers can have vastly different scales and geometryies,
                     # so homogenization is key to one set of of learning rates being meaningful across layers (else we would have to tune them per-layer).
+                    start_time = time.perf_counter()  # TIMING
                     # load the whole training fold at once (the rows of the whole blocks), for the statistics and the class weights
                     train_inputs = torch.cat([dataset.get_block("activations", "cls")[train_indices], dataset.get_block("activations", "patch_mean")[train_indices]], dim=1)
                     train_labels = dataset.get_block("labels", target)[train_indices]
@@ -183,6 +202,8 @@ class LinearProbe:
                     num_classes = len(self.label_names[target])
                     class_weights = len(train_labels) / (num_classes * torch.bincount(train_labels, minlength=num_classes))  # (K,)
                     assert class_weights.shape == (num_classes,)
+                    torch.cuda.synchronize()  # TIMING
+                    tqdm.write(f"{target} | {layer_name} | fold {fold} | fold prep (rows and labels to the device, statistics, class weights): {time.perf_counter() - start_time:.2f} s")  # TIMING
 
                     # train the current fold for each grid position
                     for lr in self._cfg["lrs"]:  # grid axis 1
