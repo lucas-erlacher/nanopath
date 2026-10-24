@@ -11,6 +11,7 @@
 #  why no loss balancing in evaluation: the weights correct what the probe learns i.e. balancing is central to training - balancing is not essential for validation loss computation i.e. we prefer to have an undistorted performance picture in evaluation.
 
 import math
+import multiprocessing
 import time
 from collections import Counter
 
@@ -168,6 +169,7 @@ class LinearProbe:
         timings["metrics"] = time.perf_counter() - t  # TIMING
         tqdm.write("    timings over " + str(self._cfg["epochs"]) + " epochs: " + ", ".join(f"{name} {seconds:.2f} s" for name, seconds in timings.items()))  # TIMING
         tqdm.write("    loader breakdown (inside the data time of train and val together, which is " + f"{timings['train data'] + timings['val data']:.2f} s): " + ", ".join(f"{name} {seconds:.2f} s" for name, seconds in TIMINGS.items()))  # TIMING
+        tqdm.write(f"    live worker processes: {len(multiprocessing.active_children())}")  # TIMING: this training uses 2 x num_workers (train and val loaders), more means workers of earlier trainings are not shut down
         return metrics, train_losses, val_losses
 
     def run(self):
