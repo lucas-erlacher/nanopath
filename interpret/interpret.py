@@ -16,6 +16,8 @@ from pathlib import Path
 
 from model import ViT
 from probe import worker_probe_transforms
+from dataloader import HED_FROM_RGB, rgb_to_hed
+from prepare import tissue_mask
 from interpret.datasets import load_dataset
 from interpret.data import ActivationDataset
 from interpret.utils import write_dashboard
@@ -67,7 +69,38 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
         assert tokens == global_state["tokens"], f"{where_layer} token counts {tokens} mismatch the first layer's {global_state['tokens']}."
 
 
-# Samples tiles (stratified, seeded) and writes the extraction (layout in README.md): the labels, then one pass of the model over the tiles that collects the activations and the images.
+# Labels derived from the pixels of a batch of tiles (`rgb`: (B, 3, H, W) in [0, 1], before the normalization of the model input): one value per tile and measure. The extraction cuts every measure into quantile bins,
+# so each becomes a classification target like the metadata fields.
+def derive_labels(rgb):
+    # compute the tissue fractions
+    tissue = torch.stack([tissue_mask(tile) for tile in rgb])  # (B, H, W) - stack the masks of the batch
+    num_tissue_pixels = tissue.sum(dim=(1, 2))  # (B,) - sum the 1s of the mask
+    num_pixels = tissue.shape[1] * tissue.shape[2]
+    tissue_fraction = num_tissue_pixels / num_pixels  # (B,)
+
+    # compute and unpack the stain information
+    hed = rgb_to_hed(rgb, HED_FROM_RGB.to(rgb.device))  # (B, H, W, 3): hematoxylin, eosin, DAB
+    hematoxylin = hed[:, :, :, 0]  # (B, H, W)
+    eosin = hed[:, :, :, 1]  # (B, H, W)
+
+    # compute hematoxylin and eosin target
+    # keep each stain information on the tissue pixels only and average it there 
+    num_tissue_pixels = num_tissue_pixels.clamp_min(1)  # (B,) avoid division by 0
+    hematoxylin_on_tissue = (hematoxylin * tissue)  # (B, H, W) - use mask to ignore hematoxylin information outside of tissue
+    hematoxylin_target = hematoxylin_on_tissue.sum(dim=(1, 2)) / num_tissue_pixels  # (B,) - collapse image dimensions into a scalar
+    eosin_on_tissue = (eosin * tissue)
+    eosin_target = eosin_on_tissue.sum(dim=(1, 2)) / num_tissue_pixels  
+
+    # compute brightness (the mean over the channels of every pixel), once over all pixels and once over the tissue pixels only
+    brightness = rgb.mean(dim=1)  # (B, H, W)
+    brightness_target = brightness.mean(dim=(1, 2))  # (B,) - collapse image dimensions into a scalar, background included
+    brightness_on_tissue = brightness * tissue  # (B, H, W) - use mask to ignore the brightness of the background
+    tissue_brightness_target = brightness_on_tissue.sum(dim=(1, 2)) / num_tissue_pixels  # (B,)
+
+    return {"brightness": brightness_target, "tissue_brightness": tissue_brightness_target, "tissue_fraction": tissue_fraction, "hematoxylin": hematoxylin_target, "eosin": eosin_target}
+
+
+# Samples tiles (stratified, seeded) and writes the extraction (layout in README.md): the labels (metadata fields, plus labels derived from the pixels during the pass), then one pass of the model over the tiles that collects the activations and the images.
 # info.json is written last, so it marks a complete run. `settings` determines the files (hashed in main, saved in info.json).
 def extract_activations(model, dataset, transform, settings, extract_cfg, output_dir):
     # Seeded subsample that keeps the proportions of the dataset's stratification dimension (a metadata field).
@@ -93,8 +126,6 @@ def extract_activations(model, dataset, transform, settings, extract_cfg, output
         label_names[field] = sorted({metadata[field] for metadata in sampled_metadata})
         value_to_integer = {value: integer for integer, value in enumerate(label_names[field])}
         labels[field] = torch.tensor([value_to_integer[metadata[field]] for metadata in sampled_metadata])
-    torch.save(labels, output_dir / "labels.pt")
-    (output_dir / "label_names.json").write_text(json.dumps(label_names))
 
     storage_dict = {}
     layer_names = model.register_interpretability_hooks(storage_dict)
@@ -110,11 +141,15 @@ def extract_activations(model, dataset, transform, settings, extract_cfg, output
     # EXTRACTION PASS: the tensors of every kept layer and the images are allocated at full size in RAM after the first batch (no double peak from concatenating), each batch fills in its rows, and everything is saved at the end.
     # The patch mean is computed here from the float32 tokens, so the methods never average tokens.
     tensors = {}
+    derived_labels = []  # per batch, the labels derived from its pixels
     start = 0  # the first row of the current batch
     with torch.inference_mode():
         for batch_images, _ in tqdm(loader, desc="Extracting"):
             batch_size = len(batch_images)
-            processed_images = torch.stack([transform(image) for image in batch_images])  # (batch, 3, H, W)
+            transformed = [transform(image) for image in batch_images]  # per image: (rgb, normalized)
+            rgb_images = torch.stack([rgb for rgb, _ in transformed])  # (batch, 3, H, W) in [0, 1]
+            processed_images = torch.stack([normalized for _, normalized in transformed])  # (batch, 3, H, W) the model input
+            derived_labels.append(derive_labels(rgb_images))
             storage_dict.clear()  # the hooks hold this dict, so clear it in place
             model(processed_images)
 
@@ -147,6 +182,17 @@ def extract_activations(model, dataset, transform, settings, extract_cfg, output
             start += batch_size
     assert start == num_samples
 
+    # DERIVED LABELS: every measure from the pixels (brightness, stain, tissue) is cut into 4 quantile bins by rank (0 = lowest 25%) and saved as classes, like the metadata labels
+    for name in derived_labels[0]:  # iterate over the different derived label types
+        # collect all labels of the type selected by the loop iteration 
+        values = torch.cat([derived[name] for derived in derived_labels]).cpu()  # (N,) the tiles are on the GPU (the transform's last step), so the derived values are too - so we need to send them back to CPU
+        quartile_edges = torch.quantile(values, torch.tensor([0.25, 0.5, 0.75]))  # (3,) the values that split the tiles into four equally big groups
+        labels[name] = torch.bucketize(values, quartile_edges)  # (N,) 0 = lowest quarter, 3 = highest quarter
+        label_names[name] = ["0-25%", "25-50%", "50-75%", "75-100%"]  # human readable version of the ints in labels
+    
+    torch.save(labels, output_dir / "labels.pt")
+    (output_dir / "label_names.json").write_text(json.dumps(label_names))
+
     for layer, layer_tensors in tensors.items():
         torch.save(layer_tensors["patch_tokens"], output_dir / "activations" / f"{layer}_patch_tokens.pt")
         torch.save(layer_tensors["cls"], output_dir / "activations" / f"{layer}_cls.pt")
@@ -167,13 +213,14 @@ def extract_activations(model, dataset, transform, settings, extract_cfg, output
 # MAIN
 # -------------------------------------------------------------------------------------------------
 
-# probe.py's eval transform plus the normalization it applies at its model-call sites; 
-# duplicated here because probe.py is locked, so keep the two in sync. 
+# probe.py's eval transform plus the normalization it applies at its model-call sites; duplicated here because probe.py is locked, so keep the two in sync.
+# Returns both the image after the eval transform (rgb, in [0, 1], for the labels derived from the pixels) and the normalized one (the model input).
 def evaluation_preprocess(train_cfg):
     transform, _ = worker_probe_transforms(train_cfg)
     mean = torch.tensor(train_cfg["data"]["mean"]).view(3, 1, 1)
     std = torch.tensor(train_cfg["data"]["std"]).view(3, 1, 1)
-    return transforms.Compose([transform, transforms.Lambda(lambda x: (x - mean) / std)])
+    return transforms.Compose([transform, transforms.Lambda(lambda x: (x, (x - mean) / std))])
+
 
 
 # Loads a Nanopath checkpoint and returns the model (eval mode, on the CPU), the training config its preprocessing comes
@@ -213,7 +260,7 @@ def main():
     model, train_cfg, checkpoint_step = load_model(icfg["checkpoint_path"], icfg["model_weights"])
     model = model.to(device)
     # The final Lambda puts each image on `device`, so the extractor never moves anything itself.
-    transform = transforms.Compose([evaluation_preprocess(train_cfg), transforms.Lambda(lambda x: x.to(device))])
+    transform = transforms.Compose([evaluation_preprocess(train_cfg), transforms.Lambda(lambda images: [x.to(device) for x in images])])
     print(f"Loaded checkpoint from {icfg['checkpoint_path']}")
 
     dataset_cfg = icfg["datasets"][icfg["dataset"]]

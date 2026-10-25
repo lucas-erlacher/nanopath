@@ -85,7 +85,7 @@ Questions this method answers:
 - `extract.{num_samples, batch_size, num_workers, layer_stride}`: `layer_stride` keeps every n-th
   layer counted from the last (the last is always kept); `num_workers` only parallelizes image decoding.
 - `methods`: the methods to run (`effective_rank`, `cka`); `cka.max_samples` caps the examples CKA uses (a seeded random subset, label-free so not exactly stratified), because its similarity tables are n × n (0.1 GB each at 5,000 examples, 0.4 GB at 10,000, 2.5 GB at 25,000); the other methods use all extracted examples.
-- `linear_probe`: `targets` (metadata fields to predict), `lrs` and `weight_decays` (the grid), `epochs`, `batch_size`, `leakage_group` (the metadata field whose values are never split across train and validation, `slide_id` for PathoROB) and `folds` (a `StratifiedGroupKFold` on that field).
+- `linear_probe`: `targets` (what to predict: the metadata fields and the labels derived from the tile pixels, `brightness`, `tissue_brightness`, `tissue_fraction`, `hematoxylin` and `eosin`, each cut into 4 quantile bins), `lrs` and `weight_decays` (the grid), `epochs`, `batch_size`, `leakage_group` (the metadata field whose values are never split across train and validation, `slide_id` for PathoROB) and `folds` (a `StratifiedGroupKFold` on that field).
 
 Storage per sample is `kept_layers x 257 tokens x C x 4 bytes` (float32) plus the 0.6 MB input image; for ViT-S (C=384)
 that is about 3.4 MB at stride 2 and 2.2 MB at stride 4, so 10,000 samples take about 34 GB / 22 GB on disk. The extraction holds everything in RAM before saving it
