@@ -119,7 +119,8 @@ interpret:
   seed: 42 # the one seed: samplers and all random number generators
   checkpoint_path: /content/drive/MyDrive/nanopath/interpret/checkpoints/dummy_checkpoint.pt
   model_weights: model_ema # checkpoint key: model_ema (teacher) or model (student)
-  output_dir: /content/drive/MyDrive/nanopath/interpret
+  output_dir: /content/interpret # the extraction (data/<hash>): node-local, fast
+  results_dir: /content/drive/MyDrive/nanopath/interpret/results # the results of the runs: on Drive, they survive the runtime
   dataset: pathorob_camelyon
   datasets:
     pathorob_camelyon:

@@ -267,7 +267,7 @@ def main():
     dataset_cfg = icfg["datasets"][icfg["dataset"]]
     dataset = load_dataset(icfg["dataset"], cfg["probe"]["dataset_roots"])
 
-    # Extractions are cached in output_dir/data/<hash of settings> (layout in README.md); if a run died, info.json is
+    # Extractions are cached in output_dir/data/<hash of settings> (layout in README.md; the results go to results_dir, independent of output_dir); if a run died, info.json is
     # missing and loading crashes below: delete that directory and rerun.
     extract_cfg = icfg["extract"]
     settings = {
@@ -292,7 +292,7 @@ def main():
     # One results folder per extraction and set of methods, so other extractions or method subsets don't overwrite it.
     sorted_method_names = sorted(icfg["methods"])
     methods_label = "_".join(sorted_method_names)
-    results_dir = Path(icfg["output_dir"]) / "results" / f"{settings_hash}_{methods_label}"
+    results_dir = Path(icfg["results_dir"]) / f"{settings_hash}_{methods_label}"
     results_dir.mkdir(parents=True, exist_ok=True)
     (results_dir / "config.json").write_text(json.dumps(cfg, indent=2))  # the full config of this run
 

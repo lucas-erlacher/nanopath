@@ -120,12 +120,12 @@ output_dir/                      # from the config
       label_names.json           # {field: names}, the name of integer k is names[k] (sorted unique values of the sampled tiles; "0-25%" .. "75-100%" for the derived labels)
       info.json                  # settings, git commit, kept layers, sampled dataset indices; written last by the extraction (marks it complete)
       config.json                # the full config that produced these files, written right after a fresh extraction
-  results/
-    <hash>_<methods>/            # one folder per extraction and set of methods (sorted by name), e.g. 8707bab631_cka_effective_rank
-      results.json               # the results of all methods
-      dashboard.html             # the whole run on one page, to open with a double click (see below)
-      config.json                # the full config of the last run that wrote this folder
-      <method>/                  # the plots that method defines, e.g. cka/patch_mean_cka.png, effective_rank/patch_mean_effective_rank.png, layer_inversion/error.png and layer_inversion/collage.png
+results_dir/                     # from the config, independent of output_dir (e.g. the extraction on node-local storage and the results on Drive)
+  <hash>_<methods>/            # one folder per extraction and set of methods (sorted by name), e.g. 8707bab631_cka_effective_rank
+    results.json               # the results of all methods
+    dashboard.html             # the whole run on one page, to open with a double click (see below)
+    config.json                # the full config of the last run that wrote this folder
+    <method>/                  # the plots that method defines, e.g. cka/patch_mean_cka.png, effective_rank/patch_mean_effective_rank.png, layer_inversion/error.png and layer_inversion/collage.png
 ```
 
 At the end of a run, `write_dashboard` (`utils.py`) writes `dashboard.html` into the results folder: the settings of the run, then for every method its plots (embedded in the file, so it can be moved or sent around) and the parts of its subsection of this README (papers, question, what the paper improves on, notes) as toggles. It splits a method's subsection at the lines starting with `Papers`, `Question`, `What the paper improves on` and `Notes on the implementation`.
