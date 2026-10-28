@@ -17,16 +17,16 @@ from pathlib import Path
 from model import ViT
 from probe import worker_probe_transforms
 from dataloader import HED_FROM_RGB, rgb_to_hed
-from prepare import tissue_mask
 from interpret.datasets import load_dataset
 from interpret.data import ActivationDataset
-from interpret.utils import write_dashboard
+from interpret.utils import write_dashboard, tissue_masks
 
 # Headless plotting (figures are only saved to files): Colab exports MPLBACKEND=<notebook backend>, which is not installed in the venv.
 os.environ["MPLBACKEND"] = "agg"
 from interpret.methods.effective_rank import EffectiveRank
 from interpret.methods.cka import CKA
 from interpret.methods.linear_probe import LinearProbe
+from interpret.methods.layer_inversion import LayerInversion
 
 
 # -------------------------------------------------------------------------------------------------
@@ -46,7 +46,7 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
         assert layer in storage_dict, f"{where_layer} missing from hook output."
         for group_name in REQUIRED_GROUPS:
             assert group_name in storage_dict[layer], f"{where_layer} missing required group '{group_name}'."
-        group_dict = {name: storage_dict[layer][name] for name in REQUIRED_GROUPS}
+        group_dict = {group_name: storage_dict[layer][group_name] for group_name in REQUIRED_GROUPS}
 
         for group_name, tensor in group_dict.items():
             where = f"{where_layer} group '{group_name}'"
@@ -63,7 +63,7 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
         assert patch.shape[2] == cls.shape[2], f"{where_layer} hidden dims differ: patch {patch.shape[2]} vs cls {cls.shape[2]}."
 
         # Token counts must match across all layers and batches (the first one sets them).
-        tokens = {name: tensor.shape[1] for name, tensor in group_dict.items()}
+        tokens = {group_name: tensor.shape[1] for group_name, tensor in group_dict.items()}
         if "tokens" not in global_state:
             global_state["tokens"] = tokens
         assert tokens == global_state["tokens"], f"{where_layer} token counts {tokens} mismatch the first layer's {global_state['tokens']}."
@@ -73,7 +73,7 @@ def assert_hook_interface(storage_dict, layer_names, batch_size, global_state):
 # so each becomes a classification target like the metadata fields.
 def derive_labels(rgb):
     # compute the tissue fractions
-    tissue = torch.stack([tissue_mask(tile) for tile in rgb])  # (B, H, W) - stack the masks of the batch
+    tissue = tissue_masks(rgb)  # (B, H, W) - the masks of the batch (the helper asserts that rgb is a batch of tiles in [0, 1])
     num_tissue_pixels = tissue.sum(dim=(1, 2))  # (B,) - sum the 1s of the mask
     num_pixels = tissue.shape[1] * tissue.shape[2]
     tissue_fraction = num_tissue_pixels / num_pixels  # (B,)
@@ -119,7 +119,7 @@ def extract_activations(model, dataset, transform, settings, extract_cfg, output
     (output_dir / "precomputed").mkdir()
 
     # LABELS: every metadata field as integers (its sorted unique values become 0, 1, 2, ...) plus the names to map them back. Row i is the i-th sampled tile, like in every other file.
-    sampled_metadata = [dataset.records[i][1] for i in sampled_indices]
+    sampled_metadata = [dataset.records[sampled_index][1] for sampled_index in sampled_indices]
     labels = {}  # e.g. {"medical_center": tensor([0, 1, 1, 0, ...])} - each tensor holds one integer per datapoint (int representation of metadata strings)
     label_names = {}  # e.g. {"medical_center": ["center_a", "center_b"]} - this maps the integers back to human readable strings
     for field in sampled_metadata[0]:
@@ -156,13 +156,14 @@ def extract_activations(model, dataset, transform, settings, extract_cfg, output
             assert_hook_interface(storage_dict, layer_names, batch_size, interface_state)  # before the stride
 
             rows = slice(start, start + batch_size)
-            # store images
+            # store images: the decoder target of the layer inversion is the tile as the model saw it (resized to 224 px) in [0, 1], not the normalized model input. The normalization is an invertible per-channel shift and scale
+            # that a decoder's final linear head can absorb exactly, so leaving it out costs the decoder nothing and keeps the target readable (collage, MSE in intensity units).
             if start == 0:  # allocate the image tensor with the first batch (we only know dimensions at runtime)
-                num_channels = processed_images.shape[1]
-                height = processed_images.shape[2]
-                width = processed_images.shape[3]
+                num_channels = rgb_images.shape[1]
+                height = rgb_images.shape[2]
+                width = rgb_images.shape[3]
                 images = torch.empty(num_samples, num_channels, height, width)
-            images[rows] = processed_images
+            images[rows] = rgb_images
             
             for layer in kept_layer_names:
                 patch = storage_dict[layer]["patch"]  # (batch, seq_len, channel_dim)
@@ -183,12 +184,12 @@ def extract_activations(model, dataset, transform, settings, extract_cfg, output
     assert start == num_samples
 
     # DERIVED LABELS: every measure from the pixels (brightness, stain, tissue) is cut into 4 quantile bins by rank (0 = lowest 25%) and saved as classes, like the metadata labels
-    for name in derived_labels[0]:  # iterate over the different derived label types
+    for measure_name in derived_labels[0]:  # iterate over the different derived label types
         # collect all labels of the type selected by the loop iteration 
-        values = torch.cat([derived[name] for derived in derived_labels]).cpu()  # (N,) the tiles are on the GPU (the transform's last step), so the derived values are too - so we need to send them back to CPU
+        values = torch.cat([derived[measure_name] for derived in derived_labels]).cpu()  # (N,) the tiles are on the GPU (the transform's last step), so the derived values are too - so we need to send them back to CPU
         quartile_edges = torch.quantile(values, torch.tensor([0.25, 0.5, 0.75]))  # (3,) the values that split the tiles into four equally big groups
-        labels[name] = torch.bucketize(values, quartile_edges)  # (N,) 0 = lowest quarter, 3 = highest quarter
-        label_names[name] = ["0-25%", "25-50%", "50-75%", "75-100%"]  # human readable version of the ints in labels
+        labels[measure_name] = torch.bucketize(values, quartile_edges)  # (N,) 0 = lowest quarter, 3 = highest quarter
+        label_names[measure_name] = ["0-25%", "25-50%", "50-75%", "75-100%"]  # human readable version of the ints in labels
     
     torch.save(labels, output_dir / "labels.pt")
     (output_dir / "label_names.json").write_text(json.dumps(label_names))
@@ -199,14 +200,14 @@ def extract_activations(model, dataset, transform, settings, extract_cfg, output
         torch.save(layer_tensors["patch_mean"], output_dir / "precomputed" / f"{layer}_patch_mean.pt")
     torch.save(images, output_dir / "images.pt")
 
-    info = {
+    extraction_info = {
         **settings,
         # Exact code version; -dirty means uncommitted changes.
         "git_commit": subprocess.check_output(["git", "describe", "--always", "--dirty"], cwd=Path(__file__).resolve().parent, text=True).strip(),
         "kept_layers": kept_layer_names,
         "sampled_dataset_indices": sampled_indices,
     }
-    (output_dir / "info.json").write_text(json.dumps(info))
+    (output_dir / "info.json").write_text(json.dumps(extraction_info))
 
 
 # -------------------------------------------------------------------------------------------------
@@ -219,7 +220,7 @@ def evaluation_preprocess(train_cfg):
     transform, _ = worker_probe_transforms(train_cfg)
     mean = torch.tensor(train_cfg["data"]["mean"]).view(3, 1, 1)
     std = torch.tensor(train_cfg["data"]["std"]).view(3, 1, 1)
-    return transforms.Compose([transform, transforms.Lambda(lambda x: (x, (x - mean) / std))])
+    return transforms.Compose([transform, transforms.Lambda(lambda tile: (tile, (tile - mean) / std))])
 
 
 
@@ -260,7 +261,7 @@ def main():
     model, train_cfg, checkpoint_step = load_model(icfg["checkpoint_path"], icfg["model_weights"])
     model = model.to(device)
     # The final Lambda puts each image on `device`, so the extractor never moves anything itself.
-    transform = transforms.Compose([evaluation_preprocess(train_cfg), transforms.Lambda(lambda images: [x.to(device) for x in images])])
+    transform = transforms.Compose([evaluation_preprocess(train_cfg), transforms.Lambda(lambda images: [tile.to(device) for tile in images])])
     print(f"Loaded checkpoint from {icfg['checkpoint_path']}")
 
     dataset_cfg = icfg["datasets"][icfg["dataset"]]
@@ -296,26 +297,29 @@ def main():
     (results_dir / "config.json").write_text(json.dumps(cfg, indent=2))  # the full config of this run
 
     results = {}
-    for name in icfg["methods"]:
-        print(f"Running {name}...")
+    for method_name in icfg["methods"]:
+        print(f"Running {method_name}...")
         # every method builds its own fresh datasets (one per kept layer) with exactly the blocks it needs: all data starts out on the CPU and moves to the device only when the method asks for it,
         # so methods never depend on each other. 
-        if name == "effective_rank":
+        if method_name == "effective_rank":
             datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
             method = EffectiveRank(datasets)
-        elif name == "cka":
+        elif method_name == "cka":
             datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
-            method = CKA(datasets, icfg["seed"], icfg[name])
-        elif name == "linear_probe":
+            method = CKA(datasets, icfg["seed"], icfg[method_name])
+        elif method_name == "linear_probe":
             datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
-            method = LinearProbe(datasets, device, icfg["seed"], icfg[name])
+            method = LinearProbe(datasets, device, icfg["seed"], icfg[method_name])
+        elif method_name == "layer_inversion":
+            datasets = {layer: ActivationDataset(data_dir, layer, device, patch_tokens=True, image=True) for layer in kept_layers}  # the decoders read the patch tokens and the target images
+            method = LayerInversion(datasets, device, icfg["seed"], icfg[method_name])
         else:
-            raise KeyError(f"Unknown method '{name}'; add it to the method dispatch in main() of interpret/interpret.py")
+            raise KeyError(f"Unknown method '{method_name}'; add it to the method dispatch in main() of interpret/interpret.py")
         method.run()
-        results[name] = method.results
+        results[method_name] = method.results
 
         # Each method saves the plots it defines into its own subfolder.
-        plot_dir = results_dir / name
+        plot_dir = results_dir / method_name
         plot_dir.mkdir(exist_ok=True)
         for plot_name, figure in method.plot().items():
             figure.savefig(plot_dir / f"{plot_name}.png", bbox_inches="tight")

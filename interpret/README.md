@@ -73,6 +73,18 @@ Ultimately, the normalized inner product of the centered similarity tables is **
 Questions this method answers:
 - At which layers can a linear probe recover high-level labels (e.g. tissue class) and low-level labels (e.g. site/stain), and how does this change with depth?
 
+### layer_inversion
+
+Papers:
+- [Dosovitskiy & Brox 2016](https://arxiv.org/abs/1506.02753): a decoder trained per layer to rebuild the input image from that layer's activations.
+- [He et al. 2022 (MAE)](https://arxiv.org/abs/2111.06377): the per-patch linear head and the transformer decoder on ViT tokens.
+- [Xu et al. 2020](https://arxiv.org/abs/2002.10689): why a reconstruction measures the information a given decoder family can extract, and not all the information of the layer.
+- The survey of the field is in `layer_inversion_literature.md` and the settled design in `layer_inversion_spec.md`.
+
+Questions this method answers:
+- How much of the tile (colour, layout, texture) can a decoder rebuild from each layer, and how does this change with depth?
+- Is the tile information of a layer local to each patch-token or does it depend on the other patch-tokens? The linear decoder sees only the token of its own patch (the local baseline), the transformer decoder exchanges information between all tokens, so the gap between them is the share that needs context (it also contains the effect of the transformer's nonlinearity).
+
 ## Config (`interpret:` in `configs/main.yaml`)
 
 - `checkpoint_path`, `model_weights` (the checkpoint key: `model_ema` for the teacher, `model` for the student): the model to analyse.
@@ -84,8 +96,9 @@ Questions this method answers:
 - `seed`: the one seed of the interpret config. It seeds the extraction sampler, CKA's random subset and, via `set_seeds`, every random number generator plus deterministic GPU mode (an operation without a deterministic implementation raises an error).
 - `extract.{num_samples, batch_size, num_workers, layer_stride}`: `layer_stride` keeps every n-th
   layer counted from the last (the last is always kept); `num_workers` only parallelizes image decoding.
-- `methods`: the methods to run (`effective_rank`, `cka`); `cka.max_samples` caps the examples CKA uses (a seeded random subset, label-free so not exactly stratified), because its similarity tables are n × n (0.1 GB each at 5,000 examples, 0.4 GB at 10,000, 2.5 GB at 25,000); the other methods use all extracted examples.
-- `linear_probe`: `targets` (what to predict: the metadata fields and the labels derived from the tile pixels, `brightness`, `tissue_brightness`, `tissue_fraction`, `hematoxylin` and `eosin`, each cut into 4 quantile bins), `lrs` and `weight_decays` (the grid), `epochs`, `batch_size`, `leakage_group` (the metadata field whose values are never split across train and validation, `slide_id` for PathoROB) and `folds` (a `StratifiedGroupKFold` on that field).
+- `methods`: the methods to run (`effective_rank`, `cka`, `linear_probe`, `layer_inversion`); `cka.max_samples` caps the examples CKA uses (a seeded random subset, label-free so not exactly stratified), because its similarity tables are n × n (0.1 GB each at 5,000 examples, 0.4 GB at 10,000, 2.5 GB at 25,000); the other methods use all extracted examples.
+- `linear_probe`: `targets` (what to predict: the metadata fields and the labels derived from the tile pixels, `brightness`, `tissue_brightness`, `tissue_fraction`, `hematoxylin` and `eosin`, each cut into 4 quantile bins), `lrs` and `weight_decays` (the grid), `epochs`, `batch_size`, `num_workers` (the DataLoader worker processes that fetch the batches), `leakage_group` (the metadata field whose values are never split across train and validation, `slide_id` for PathoROB) and `folds` (a `StratifiedGroupKFold` on that field).
+- `layer_inversion`: `decoders` (`linear`: one linear head shared by all patch tokens, `transformer`: transformer blocks over the CLS and patch tokens, then the same head), `transformer` (the settings of that decoder: `depth` and, per `Block`, `head_dim`, `mlp_ratio` and `drop_path`), `lrs` and `weight_decays` (the grid), `epochs`, `batch_size`, `num_workers`, `num_collage_rows` (the rows of the collage), `stratify` (the metadata field the folds are stratified on), `leakage_group` and `folds` (as for the probe). The decoders train on the patch tokens and the images of every layer, so the datasets are opened with `patch_tokens=True, image=True`.
 
 Storage per sample is `kept_layers x 257 tokens x C x 4 bytes` (float32) plus the 0.6 MB input image; for ViT-S (C=384)
 that is about 3.4 MB at stride 2 and 2.2 MB at stride 4, so 10,000 samples take about 34 GB / 22 GB on disk. The extraction holds everything in RAM before saving it
@@ -102,9 +115,9 @@ output_dir/                      # from the config
         <layer>_cls.pt           # (N, C) float32, the CLS token of that layer
       precomputed/
         <layer>_patch_mean.pt    # (N, C) float32, the mean over the patch tokens of that layer, computed once during the extraction
-      images.pt                  # (N, 3, H, W) float32, the model input of every tile (about 6 GB for 10,000 samples)
-      labels.pt                  # {metadata field: (N,) int64}, every metadata field as integers
-      label_names.json           # {metadata field: names}, the name of integer k is names[k] (sorted unique values of the sampled tiles)
+      images.pt                  # (N, 3, H, W) float32, the tile as the model saw it (resized, in [0, 1], before the normalization of the model input; about 6 GB for 10,000 samples)
+      labels.pt                  # {field: (N,) int64}, every metadata field as integers plus the labels derived from the tile pixels (brightness, tissue_brightness, tissue_fraction, hematoxylin, eosin: quartile bins)
+      label_names.json           # {field: names}, the name of integer k is names[k] (sorted unique values of the sampled tiles; "0-25%" .. "75-100%" for the derived labels)
       info.json                  # settings, git commit, kept layers, sampled dataset indices; written last by the extraction (marks it complete)
       config.json                # the full config that produced these files, written right after a fresh extraction
   results/
@@ -112,7 +125,7 @@ output_dir/                      # from the config
       results.json               # the results of all methods
       dashboard.html             # the whole run on one page, to open with a double click (see below)
       config.json                # the full config of the last run that wrote this folder
-      <method>/                  # the plots that method defines, e.g. cka/patch_mean_cka.png, effective_rank/patch_mean_effective_rank.png
+      <method>/                  # the plots that method defines, e.g. cka/patch_mean_cka.png, effective_rank/patch_mean_effective_rank.png, layer_inversion/error.png and layer_inversion/collage.png
 ```
 
 At the end of a run, `write_dashboard` (`utils.py`) writes `dashboard.html` into the results folder: the settings of the run, then for every method its plots (embedded in the file, so it can be moved or sent around) and the parts of its subsection of this README (papers, question, what the paper improves on, notes) as toggles. It splits a method's subsection at the lines starting with `Papers`, `Question`, `What the paper improves on` and `Notes on the implementation`.
@@ -170,7 +183,7 @@ Nothing else in the rig needs to change.
   `probe.dataset_roots`; `probe.py`'s loaders are the precedent), returns `(PIL image, metadata dict)` and exposes
   `records`, a list of `(image, metadata)` per sample (the sampler stratifies over `metadata[stratification_dimension]`);
   add it to `load_dataset` and a block under `datasets:` in the config.
-- New method: a class in its own file in `interpret/methods/`, `Method(datasets)` (`Method(datasets, device)` if it builds its own modules, like the probe's head; `datasets` is `{layer name: ActivationDataset}`; enable `patch_tokens` or `image` on a dataset if the method needs token-level data or images) with `run()`, which stores a nested dict of
+- New method: a class in its own file in `interpret/methods/`, `Method(datasets)` (`Method(datasets, device)` if it builds its own modules, like the probe's model; a method that trains models on folds subclasses `Probe` in `probe_base.py` and implements its hooks, like `linear_probe.py` and `layer_inversion.py` (the hooks, their arguments, and what is asserted about them and what is not are documented in `probe_base.py`; not to be confused with the model hooks above); `datasets` is `{layer name: ActivationDataset}`; enable `patch_tokens` or `image` on a dataset if the method needs token-level data or images) with `run()`, which stores a nested dict of
   plain numbers in `self.results`, and `plot()`, which returns `{file name: matplotlib Figure}` built from `self.results`
   (`main()` saves the figures); add it to the dispatch in `main()` and an entry in `methods` in the config (a method with tunables gets its own config sub-block, passed to its constructor in the dispatch), and a subsection under
   Methods here (the papers behind it, the questions it answers, notes on the implementation).

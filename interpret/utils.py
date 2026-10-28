@@ -1,5 +1,5 @@
 # interpret/utils.py: helpers of the interpretability rig.
-# standardize puts a batch of vectors on a common scale. write_dashboard builds the self-contained dashboard.html of a run: its settings, and per method the plots and the README parts as toggles.
+# tissue_masks finds the tissue pixels of a batch of tiles. write_dashboard builds the self-contained dashboard.html of a run: its settings, and per method the plots and the README parts as toggles.
 
 import base64
 import html
@@ -8,6 +8,9 @@ import re
 from pathlib import Path
 
 import markdown
+import torch
+
+from prepare import tissue_mask
 
 # Style of the dashboard: the browser's own light/dark colors, a readable column, plots side by side.
 STYLE = """
@@ -29,46 +32,49 @@ pre { overflow-x: auto; }
 """
 
 
-# standardizes (vectorized). 
-def standardize(inputs, mean, std):
-    return (inputs - mean) / std
-
+# The tissue mask of a batch of tiles with the repo's rule (tissue_mask in prepare.py, which takes one tile at a time). The rule thresholds the saturation of RGB values in [0, 1], so a batch that is normalized, in 0-255
+# or without the batch dimension would give a meaningless mask without any error: the preconditions are asserted here, every use of the tissue rule in the rig goes through this function.
+def tissue_masks(images):  # (B, 3, H, W) floats in [0, 1] -> (B, H, W) booleans
+    assert images.ndim == 4 and images.shape[1] == 3, f"expected tiles of shape (B, 3, H, W), got {tuple(images.shape)}"
+    assert images.dtype.is_floating_point, f"expected float tiles in [0, 1], got {images.dtype}"
+    assert images.min() >= 0.0 and images.max() <= 1.0, f"the tissue rule needs RGB in [0, 1] (not normalized, not 0-255), got the range [{images.min().item():.3g}, {images.max().item():.3g}]"
+    return torch.stack([tissue_mask(tile) for tile in images])
 
 
 # Writes results_dir/dashboard.html, to open with a double click: the settings of the run, then one section per method with its plots (embedded in the file,
 # so it can be moved or sent around) and the parts of that method's subsection of README.md (papers, questions, notes, ...) as toggles.
 def write_dashboard(results_dir, data_dir, cfg):
     icfg = cfg["interpret"]
-    info = json.loads((data_dir / "info.json").read_text())
+    extraction_info = json.loads((data_dir / "info.json").read_text())
     readme = (Path(__file__).resolve().parent / "README.md").read_text()
 
     summary = {
         "checkpoint": icfg["checkpoint_path"], "weights": icfg["model_weights"], "dataset": icfg["dataset"],
-        "examples": info["num_samples"], "seed": icfg["seed"],
-        "kept layers": ", ".join(info["kept_layers"]), "extraction git commit": info["git_commit"],
+        "examples": extraction_info["num_samples"], "seed": icfg["seed"],
+        "kept layers": ", ".join(extraction_info["kept_layers"]), "extraction git commit": extraction_info["git_commit"],
     }
     summary_rows = ""
-    for key, value in summary.items():
-        summary_rows += f"<tr><th>{key}</th><td>{html.escape(str(value))}</td></tr>"
+    for setting, setting_value in summary.items():
+        summary_rows += f"<tr><th>{setting}</th><td>{html.escape(str(setting_value))}</td></tr>"
     body = f"<h1>Interpretability run</h1><table>{summary_rows}</table>"
     body += f"<details><summary>full config</summary><pre>{html.escape(json.dumps(cfg, indent=2))}</pre></details>"
 
-    for name in icfg["methods"]:
+    for method_name in icfg["methods"]:
         headline_plots = ""
         debug_plots = ""
-        for plot_path in sorted((results_dir / name).glob("*.png")):
+        for plot_path in sorted((results_dir / method_name).glob("*.png")):
             encoded = base64.b64encode(plot_path.read_bytes()).decode()
             image = f"<img src='data:image/png;base64,{encoded}' alt='{plot_path.stem}'>"
             if plot_path.name.startswith("debug_"):  # the debugging plots of a method are folded away
                 debug_plots += image
             else:
                 headline_plots += image
-        body += f"<section class='card'><h2>{name}</h2><div class='plots'>{headline_plots}</div>"
+        body += f"<section class='card'><h2>{method_name}</h2><div class='plots'>{headline_plots}</div>"
         if debug_plots != "":
             body += f"<details><summary>debug plots</summary><div class='plots'>{debug_plots}</div></details>"
 
         # this method's subsection of README.md, split at the lines that start one of its parts
-        method_text = re.search(rf"^### {name}\n(.*?)(?=^##|\Z)", readme, re.S | re.M).group(1)
+        method_text = re.search(rf"^### {method_name}\n(.*?)(?=^##|\Z)", readme, re.S | re.M).group(1)
         for part in re.split(r"(?m)^(?=Papers|Question|What the paper improves on|Notes on the implementation)", method_text):
             if part.strip() == "":
                 continue

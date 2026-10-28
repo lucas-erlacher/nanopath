@@ -1,6 +1,6 @@
 # interpret/methods/linear_probe.py: linear probes on the [CLS, patch mean] embedding of every layer, for the targets in the config (the spec is in README.md).
 
-# DATA LEAKAGE PREVENTION (the primary objective, it always wins), in two places marked in the code:
+# DATA LEAKAGE PREVENTION (the primary objective, it always wins), in two places marked in the code (the shared skeleton is in probe_base.py):
 #  - in the split: StratifiedGroupKFold puts all tiles with the same leakage_group value (a slide, in our config) on one side of every split, so the validation fold never contains a group the probe has trained on.
 #  - in the standardization: the mean and std come from the training fold only, so no statistic of the validation fold flows into the training.
 #
@@ -19,208 +19,103 @@ import torch.nn.functional as F
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from sklearn.metrics import balanced_accuracy_score, f1_score, roc_auc_score
-from sklearn.model_selection import StratifiedGroupKFold
-from tqdm import tqdm
 
-from interpret.data import DeviceLoader
-from interpret.utils import standardize
-
-METRICS = ("balanced_accuracy", "macro_f1", "macro_auroc")  # the first one selects the best grid point
+from interpret.methods.probe_base import Probe
 
 
-class LinearProbe:
+
+class LinearProbe(Probe):
+    NAME = "linear probe"
+    METRICS = ("balanced_accuracy", "macro_f1", "macro_auroc")  # the first one selects the best grid point
+    BEST = max
+    VARIANTS_KEY = "targets"
+
     def __init__(self, datasets, device, seed, method_cfg):
-        self._datasets = datasets  # {layer name: ActivationDataset}, see data.py
-        self.device = device  # where the linear head lives (the datasets already hand out tensors on it)
-        self.seed = seed
-        self._cfg = method_cfg
-        self.results = None
+        super().__init__(datasets, device, seed, method_cfg, variants=method_cfg["targets"])
+        self.briefing = self.print_briefing(list(datasets.values())[0])
 
-        self.layer_names = list(datasets)
+    # -------------------------------------------------------------------------------------------------
+    # HOOKS
+    # -------------------------------------------------------------------------------------------------
 
-        # the labels (integers) and their names are the same in the dataset of every layer, so the first one gives them all
-        first_dataset = list(datasets.values())[0]
-        self.labels = first_dataset.get_block("labels", to_device=False)  # all labels, they stay on the CPU: the folds (sklearn) and the briefing work on the host
-        self.label_names = first_dataset.label_names  
-        group_ids = self.labels[self._cfg["leakage_group"]].numpy()
+    # the variant of the linear probe is its target. The folds of a target are stratified on its own labels (shared by all layers and grid points of that target, so the layers are compared on the same folds)
+    def stratify_labels(self, variant):
+        return self.labels[variant]
 
-        # pre-compute folds (once per target)
+    # The statistics of the training fold: the standardization (mean and std of the inputs) and the class weights.
+    def fold_stats(self, dataset, variant, train_indices):
+        # data preprocessing (standardization): 
+        # improves the conditioning number of the embedding cloud (the ratio of its largest to its smallest singular value) i.e. it 
+        # homogenizes the spread of the cloud, which makes the optimization process easier. this matters especially in our context: 
+        # we use the same fixed set of learning rates for every layer, but the embedding clouds after different layers can have vastly different scales and geometryies,
+        # so homogenization is key to one set of of learning rates being meaningful across layers (else we would have to tune them per-layer).
+        # load the whole training fold at once (the rows of the whole blocks), for the statistics and the class weights
+        train_inputs = torch.cat([dataset.get_block("activations", "cls")[train_indices], dataset.get_block("activations", "patch_mean")[train_indices]], dim=1)
+        train_labels = dataset.get_block("labels", variant)[train_indices]
+        mean = train_inputs.mean(dim=0)
+        std = train_inputs.std(dim=0)
         # DATA LEAKAGE PREVENTION
+        # prepare_batch() standardizes every batch of both folds with these training statistics (no leakage of validation statistics into training set)
+
         # CLASS BALANCING
-        self.folds = {}
-        for target in self._cfg["targets"]:
-            splitter = StratifiedGroupKFold(n_splits=self._cfg["folds"], shuffle=True, random_state=seed)
-            self.folds[target] = []
-            for train_indices, val_indices in splitter.split(list(range(len(first_dataset))), self.labels[target].numpy(), groups=group_ids):
-                self.folds[target].append((train_indices.tolist(), val_indices.tolist()))
+        # loss() weights the loss of every class with these weights, which come from the training fold only
+        num_classes = len(self.label_names[variant])
+        class_weights = train_labels.shape[0] / (num_classes * torch.bincount(train_labels, minlength=num_classes))  # (K,)
+        assert class_weights.shape == (num_classes,)
+        return {"mean": mean, "std": std, "class_weights": class_weights}
 
-        self.briefing = self.print_briefing(first_dataset)
+    def make_model(self, variant, fold_statistics):
+        return torch.nn.Linear(fold_statistics["mean"].shape[0], fold_statistics["class_weights"].shape[0])
 
-    # -------------------------------------------------------------------------------------------------
-    # TRAINING + EVALUATION
-    # -------------------------------------------------------------------------------------------------
+    # The standardization with the statistics of the training fold: the mean and std of every feature of the (batch, 2C) inputs.
+    def _standardize(self, inputs, fold_statistics):
+        assert inputs.shape[1:] == fold_statistics["mean"].shape == fold_statistics["std"].shape  # input is (batch, 2C), mean and std are (2C,)
+        return (inputs - fold_statistics["mean"]) / fold_statistics["std"]  # broadcasts mean and std along batch dimension
 
-    def _setting_name(self, lr, weight_decay):
-        return f"lr={lr:g},weight_decay={weight_decay:g}"
-
-    # The inputs and the labels of one batch of an ActivationDataset: the inputs are [CLS, patch mean] concatenated, the labels are the integers of the target.
-    def prepare_batch(self, batch, target):
+    # The standardized inputs and the labels of one batch of an ActivationDataset: the inputs are [CLS, patch mean] concatenated, the labels are the integers of the target.
+    def prepare_batch(self, batch, variant, fold_statistics):
         inputs = torch.cat([batch["cls"], batch["patch_mean"]], dim=1)  # (batch, 2C)
-        labels = batch["labels"][target]  # (batch,)
-        assert inputs.shape == (len(labels), 2 * batch["cls"].shape[1])
+        inputs = self._standardize(inputs, fold_statistics)
+        labels = batch["labels"][variant]  # (batch,)
+        assert inputs.shape == (labels.shape[0], 2 * batch["cls"].shape[1])
+        assert labels.shape == (inputs.shape[0],)
         return inputs, labels
 
-    # Trains one linear head per grid position on the training subset, all on the same batches (every batch is fetched once and used by every head), and returns for every grid position
-    # {setting name: (metrics on the validation subset after the final epoch, per-epoch train loss, per-epoch validation loss)}.
-    # The validation loss is a diagnostic only. Both subsets are prepared and standardized in the same way (with the training statistics mean and std, see run()).
-    def train_heads_on_fold(self, target, dataset, train_indices, val_indices, mean, std, class_weights):
-        generator = torch.Generator().manual_seed(self.seed)  # one shuffling for all heads, so every head sees the same batches in the same order
-        train_loader = DeviceLoader(dataset, self.device, train_indices, self._cfg["batch_size"], shuffle=True, generator=generator, num_workers=self._cfg["num_workers"])  # the training examples in a new random order every epoch, batches already on the device
-        val_loader = DeviceLoader(dataset, self.device, val_indices, self._cfg["batch_size"], num_workers=self._cfg["num_workers"])
+    def loss(self, outputs, targets, fold_statistics, train):
+        assert outputs.shape == (targets.shape[0], fold_statistics["class_weights"].shape[0])  # (batch, K), one score per class
+        # scalar (loss computed per example, times its class weight, then the weighted mean over the batch); the validation loss is unweighted: the evaluation is not balanced
+        return F.cross_entropy(outputs, targets, weight=fold_statistics["class_weights"] if train else None)
 
-        # create one probing layer and optimizer per grid position
-        num_classes = len(class_weights)
-        setting_names = []
-        heads = []
-        optimizers = []
-        for lr in self._cfg["lrs"]:  # grid axis 1
-            for weight_decay in self._cfg["weight_decays"]:  # grid axis 2
-                torch.manual_seed(self.seed)  # reseeded for every head, so all heads start from the same initialization and a training does not depend on the loop order
-                head = torch.nn.Linear(mean.shape[0], num_classes).to(self.device)
-                setting_names.append(self._setting_name(lr, weight_decay))
-                heads.append(head)
-                optimizers.append(torch.optim.Adam(head.parameters(), lr=lr, weight_decay=weight_decay))
+    # The scores and the labels of the validation subset, collected over the batches of the validation pass, for the metrics (the base tracks only the loss curves); the pass of the last epoch gives the final ones.
+    def start_evaluation_collection(self, num_models, fold_statistics):
+        return {"outputs": [[] for _ in range(num_models)], "targets": []}  # per model, the scores of every batch; the labels, the same for every model
 
-        train_losses = [[] for _ in heads]  # per head, one value per epoch
-        val_losses = [[] for _ in heads]
-        for epoch in range(self._cfg["epochs"]):
-            # train epoch
-            batch_losses = [[] for _ in heads]  # per head, the loss of every batch
-            for batch in train_loader:
-                inputs, targets = self.prepare_batch(batch, target)  # (batch, D), (batch,)
-                inputs = standardize(inputs, mean, std)
-                assert targets.shape == (len(inputs),)
+    def collect_evaluation_batch(self, evaluation_state, outputs_per_model, targets, variant, layer_name, fold, setting_names, last_epoch):
+        # the batch dimension is intentionally not reduced (every batch is appended whole and concatenated in final_evaluation): the metrics are computed once over all validation tiles, never averaged over batches, so the smaller last batch is not over-weighted
+        evaluation_state["targets"].append(targets)
+        for model_index, outputs in enumerate(outputs_per_model):
+            evaluation_state["outputs"][model_index].append(outputs)
 
-                # forward and backward passes of every head on this batch
-                for g, head in enumerate(heads):
-                    outputs = head(inputs)  # (batch, K), one score per class
-                    assert outputs.shape == (len(inputs), num_classes)
-                    loss = F.cross_entropy(outputs, targets, weight=class_weights)  # scalar (loss computed per example, times its class weight, then the weighted mean over the batch)
-                    assert loss.shape == ()
-                    optimizers[g].zero_grad()
-                    loss.backward()
-                    optimizers[g].step()
-                    batch_losses[g].append(loss.detach())
-            for g in range(len(heads)):
-                train_loss = torch.stack(batch_losses[g]).mean()  # mean of the batch losses
-                assert train_loss.shape == ()
-                train_losses[g].append(train_loss.item())
-
-            # validation at end of train epoch
-            with torch.no_grad():
-                batch_losses = [[] for _ in heads]
-                val_outputs = [[] for _ in heads]  # collected for the metrics of the last epoch
-                val_targets = []  # the same for every head
-                for batch in val_loader:
-                    inputs, targets = self.prepare_batch(batch, target)  # (batch, D), (batch,)
-                    inputs = standardize(inputs, mean, std)
-                    assert targets.shape == (len(inputs),)
-                    val_targets.append(targets)
-
-                    # forward pass of every head
-                    for g, head in enumerate(heads):
-                        outputs = head(inputs)  # (batch, K), one score per class
-                        assert outputs.shape == (len(inputs), num_classes)
-                        loss = F.cross_entropy(outputs, targets)  # scalar, unweighted: the evaluation is not balanced
-                        assert loss.shape == ()
-                        batch_losses[g].append(loss)
-                        val_outputs[g].append(outputs)
-                val_targets = torch.cat(val_targets)  # (n_val,)
-                for g in range(len(heads)):
-                    val_loss = torch.stack(batch_losses[g]).mean()  # mean of the batch losses
-                    assert val_loss.shape == ()
-                    val_outputs[g] = torch.cat(val_outputs[g])  # (n_val, K)
-                    assert val_outputs[g].shape == (len(val_indices), num_classes)
-                    val_losses[g].append(val_loss.item())
-
-        # final evaluation: the heads have not changed since the validation of the last epoch, so those outputs are the final outputs
+    def final_evaluation(self, evaluation_state, variant, layer_name, fold, setting_names, fold_statistics):
+        num_classes = fold_statistics["class_weights"].shape[0]
+        val_targets = torch.cat(evaluation_state["targets"])  # (n_val,)
         y_true = val_targets.cpu().numpy()
         results = {}
-        for g, setting_name in enumerate(setting_names):
-            probabilities = torch.softmax(val_outputs[g], dim=1).cpu().numpy()
+        for model_index, setting_name in enumerate(setting_names):
+            val_outputs = torch.cat(evaluation_state["outputs"][model_index])  # (n_val, K)
+            assert val_outputs.shape == (y_true.shape[0], num_classes)
+            probabilities = torch.softmax(val_outputs, dim=1).cpu().numpy()
             y_pred = probabilities.argmax(axis=1)
 
             # compute metrics
-            metrics = {
+            results[setting_name] = {
                 "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
                 "macro_f1": f1_score(y_true, y_pred, average="macro", zero_division=0),
                 # macro one-vs-rest AUROC for any number of classes: with one-hot labels, sklearn treats every class as its own binary problem and averages them
                 # (the multi_class="ovr" form of roc_auc_score needs a 1-D score when there are two classes, so it would need an if/else)
                 "macro_auroc": roc_auc_score(np.eye(num_classes)[y_true], probabilities, average="macro"),
             }
-            results[setting_name] = (metrics, train_losses[g], val_losses[g])
-
         return results
-
-    def run(self):
-        targets_results = {}
-
-        for target in self._cfg["targets"]:
-            targets_results[target] = {}
-
-            for layer_name in tqdm(self.layer_names, desc=f"linear probe ({target})"):  # iterate over layers, first to last
-                dataset = self._datasets[layer_name]
-                grid = {}
-
-                # initialize grid data structure
-                for lr in self._cfg["lrs"]:
-                    for weight_decay in self._cfg["weight_decays"]:
-                        grid[self._setting_name(lr, weight_decay)] = {"folds": [], "curves": {"train_loss": [], "val_loss": []}}
-
-                # train all folds for all grid positions
-                for fold, (train_indices, val_indices) in enumerate(self.folds[target]):
-                    # data preprocessing (standardization): 
-                    # improves the conditioning number of the embedding cloud (the ratio of its largest to its smallest singular value) i.e. it 
-                    # homogenizes the spread of the cloud, which makes the optimization process easier. this matters especially in our context: 
-                    # we use the same fixed set of learning rates for every layer, but the embedding clouds after different layers can have vastly different scales and geometryies,
-                    # so homogenization is key to one set of of learning rates being meaningful across layers (else we would have to tune them per-layer).
-                    # load the whole training fold at once (the rows of the whole blocks), for the statistics and the class weights
-                    train_inputs = torch.cat([dataset.get_block("activations", "cls")[train_indices], dataset.get_block("activations", "patch_mean")[train_indices]], dim=1)
-                    train_labels = dataset.get_block("labels", target)[train_indices]
-                    mean = train_inputs.mean(dim=0)
-                    std = train_inputs.std(dim=0)
-                    # DATA LEAKAGE PREVENTION
-                    # train_heads_on_fold() standardizes every batch of both folds with these training statistics (no leakage of validation statistics into training set)
-
-                    # CLASS BALANCING
-                    # train_heads_on_fold() weights the loss of every class with these weights, which come from the training fold only
-                    num_classes = len(self.label_names[target])
-                    class_weights = len(train_labels) / (num_classes * torch.bincount(train_labels, minlength=num_classes))  # (K,)
-                    assert class_weights.shape == (num_classes,)
-
-                    # train the heads of all grid positions of the current fold together: the batches are fetched once and every head trains on them
-                    fold_results = self.train_heads_on_fold(target, dataset, train_indices, val_indices, mean, std, class_weights)
-                    # store results
-                    for setting_name, (metrics, train_losses, val_losses) in fold_results.items():
-                        entry = grid[setting_name]
-                        entry["folds"].append(metrics)
-                        entry["curves"]["train_loss"].append(train_losses)
-                        entry["curves"]["val_loss"].append(val_losses)
-
-                # compute mean and std over the folds, and the best grid point by the first metric
-                for entry in grid.values():
-                    entry["mean"] = {}
-                    entry["std"] = {}
-                    for metric in METRICS:
-                        values = []
-                        for fold_metrics in entry["folds"]:
-                            values.append(fold_metrics[metric])
-                        entry["mean"][metric] = float(np.mean(values))
-                        entry["std"][metric] = float(np.std(values))
-                best_setting = max(grid, key=lambda setting: grid[setting]["mean"][METRICS[0]])
-                targets_results[target][layer_name] = {"grid": grid, "best_setting": best_setting}
-
-        self.results = {"briefing": self.briefing, "targets": targets_results}
 
     # -------------------------------------------------------------------------------------------------
     # BRIEFING + PLOTTING
@@ -259,7 +154,7 @@ class LinearProbe:
         lines.append("DATA")
         class_counts = {}
         for target in self._cfg["targets"]:
-            counts = Counter(self.label_names[target][k] for k in self.labels[target].tolist())
+            counts = Counter(self.label_names[target][class_index] for class_index in self.labels[target].tolist())
             class_counts[target] = dict(counts)
             lines.append(f"{target}: {self._format_counts(counts, self.label_names[target])}")
         if len(self._cfg["targets"]) >= 2:  # how the first two targets overlap, to see if they are confounded
@@ -276,10 +171,10 @@ class LinearProbe:
         for target in self._cfg["targets"]:
             fold_stats[target] = []
             for fold, (train_indices, val_indices) in enumerate(self.folds[target]):
-                train_groups = sorted({group_names[k] for k in self.labels[group_field][train_indices].tolist()})
-                val_groups = sorted({group_names[k] for k in self.labels[group_field][val_indices].tolist()})
-                train_counts = Counter(self.label_names[target][k] for k in self.labels[target][train_indices].tolist())
-                val_counts = Counter(self.label_names[target][k] for k in self.labels[target][val_indices].tolist())
+                train_groups = sorted({group_names[group_index] for group_index in self.labels[group_field][train_indices].tolist()})
+                val_groups = sorted({group_names[group_index] for group_index in self.labels[group_field][val_indices].tolist()})
+                train_counts = Counter(self.label_names[target][class_index] for class_index in self.labels[target][train_indices].tolist())
+                val_counts = Counter(self.label_names[target][class_index] for class_index in self.labels[target][val_indices].tolist())
                 fold_stats[target].append({"train_groups": train_groups, "val_groups": val_groups, "classes": {"train": dict(train_counts), "val": dict(val_counts)}})
                 lines.append(
                     f"fold {fold} | {target} | train {len(train_indices)} tiles, {len(train_groups)} groups: {self._format_counts(train_counts, self.label_names[target])}"
@@ -311,7 +206,7 @@ class LinearProbe:
         for target, layers_results in self.results["targets"].items():
             figure = Figure(figsize=(8, 5))
             axis = figure.subplots()
-            for metric in METRICS:
+            for metric in self.METRICS:
                 means = []
                 stds = []
                 for layer_name in self.layer_names:
@@ -337,15 +232,15 @@ class LinearProbe:
                 for lr in self._cfg["lrs"]:
                     row = []
                     for weight_decay in self._cfg["weight_decays"]:
-                        row.append(layer_results["grid"][self._setting_name(lr, weight_decay)]["mean"][METRICS[0]])
+                        row.append(layer_results["grid"][self._setting_name(lr, weight_decay)]["mean"][self.METRICS[0]])
                     primary.append(row)
                 axis.imshow(primary, vmin=0, vmax=1)
                 for row_index, lr in enumerate(self._cfg["lrs"]):
                     for column_index, weight_decay in enumerate(self._cfg["weight_decays"]):
-                        entry = layer_results["grid"][self._setting_name(lr, weight_decay)]
+                        grid_point = layer_results["grid"][self._setting_name(lr, weight_decay)]
                         cell_lines = []
-                        for metric in METRICS:
-                            cell_lines.append(f"{metric}\n{entry['mean'][metric]:.3f} +- {entry['std'][metric]:.3f}")
+                        for metric in self.METRICS:
+                            cell_lines.append(f"{metric}\n{grid_point['mean'][metric]:.3f} +- {grid_point['std'][metric]:.3f}")
                         axis.text(column_index, row_index, "\n".join(cell_lines), ha="center", va="center", fontsize=6, bbox={"facecolor": "white", "alpha": 0.75, "pad": 1})
                         if self._setting_name(lr, weight_decay) == layer_results["best_setting"]:
                             axis.add_patch(Rectangle((column_index - 0.5, row_index - 0.5), 1, 1, fill=False, edgecolor="red", linewidth=3))
@@ -363,8 +258,8 @@ class LinearProbe:
                     for column_index, weight_decay in enumerate(self._cfg["weight_decays"]):
                         curves = layer_results["grid"][self._setting_name(lr, weight_decay)]["curves"]
                         axis = axes[row_index][column_index]
-                        for name, label in (("train_loss", "train"), ("val_loss", "validation")):
-                            per_fold = np.array(curves[name])  # (folds, epochs)
+                        for curve_name, label in (("train_loss", "train"), ("val_loss", "validation")):
+                            per_fold = np.array(curves[curve_name])  # (folds, epochs)
                             epochs = range(1, per_fold.shape[1] + 1)
                             axis.plot(epochs, per_fold.mean(axis=0), label=label)
                             axis.fill_between(epochs, per_fold.min(axis=0), per_fold.max(axis=0), alpha=0.2)
