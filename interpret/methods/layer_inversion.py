@@ -97,6 +97,30 @@ class LayerInversion(Probe):
         
         self.briefing = self.print_briefing(first_dataset)
 
+        if "transformer" in self.variants:  # PROF: one transformer block, component by component (forward and backward of a batch)
+            tcfg = self._cfg["transformer"]; heads = self.token_channel_dim // tcfg["head_dim"]; batch = self._cfg["batch_size"]; tokens = self.num_patches + 1; C = self.token_channel_dim; T = batch * tokens  # PROF
+            block = Block(C, heads, tcfg["mlp_ratio"], 0.0).to(self.device)  # PROF
+            x = torch.randn(batch, tokens, C, device=self.device, requires_grad=True)  # PROF
+            q = torch.randn(batch, heads, tokens, tcfg["head_dim"], device=self.device, requires_grad=True)  # PROF
+            hidden = int(C * tcfg["mlp_ratio"])  # PROF
+            flops_qkv, flops_proj, flops_mlp, flops_attention = 3 * 2 * T * C * 3 * C, 3 * 2 * T * C * C, 3 * 2 * 2 * T * C * hidden, 3 * 4 * batch * heads * tokens * tokens * tcfg["head_dim"]  # PROF: matmul FLOPs of forward and backward
+            components = (  # PROF: (name, function, input, matmul FLOPs, approximate passes over the input in memory)
+                ("layer norm", block.norm1, x, 0, 5),  # PROF
+                ("qkv linear", block.attn.qkv, x, flops_qkv, 0),  # PROF
+                ("attention core (SDPA)", lambda t: F.scaled_dot_product_attention(t, t, t), q, flops_attention, 0),  # PROF
+                ("output projection", block.attn.proj, x, flops_proj, 0),  # PROF
+                ("MLP fc1 + GELU + fc2", block._ff, x, flops_mlp, 0),  # PROF
+                ("layer scale", block.ls1, x, 0, 5),  # PROF
+                ("residual add", lambda t: t + t, x, 0, 6),  # PROF
+                ("whole block", block, x, flops_qkv + flops_proj + flops_mlp + flops_attention, 0),  # PROF
+            )  # PROF
+            for name, function, inputs, flops, passes in components:  # PROF
+                for step in range(13):  # PROF
+                    if step == 3: torch.cuda.synchronize(); start = time.perf_counter()  # PROF
+                    function(inputs).sum().backward()  # PROF
+                torch.cuda.synchronize(); seconds = (time.perf_counter() - start) / 10  # PROF
+                print(f"[prof] block component {name}: {seconds * 1000:.1f} ms for forward and backward, {flops / seconds / 1e12:.2f} TFLOPS, about {passes * inputs.numel() * 4 / seconds / 1e9:.0f} GB/s")  # PROF
+
     # -------------------------------------------------------------------------------------------------
     # HOOKS
     # -------------------------------------------------------------------------------------------------

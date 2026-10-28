@@ -143,7 +143,7 @@ interpret:
     leakage_group: slide_id  # metadata field whose values are never split across train and validation 
     folds: 4 
   layer_inversion:
-    decoders: [linear, transformer]
+    decoders: [transformer]
     transformer: # the blocks of the transformer decoder, with the encoder's block settings
       depth: 4
       head_dim: 64
@@ -151,10 +151,10 @@ interpret:
       drop_path: 0.0
     lrs: [1.0e-3, 3.0e-4] # grid
     weight_decays: [0.0] # a weight decay would also pull the output bias (which we rely on for compensating the omitted standardization of the target images)
-    epochs: 10
+    epochs: 2
     batch_size: 128
     num_workers: 8
     stratify: biological_class # metadata field the folds are stratified on
     leakage_group: slide_id # metadata field whose values are never split across train and validation
-    folds: 4
+    folds: 2
     num_collage_rows: 8 # rows of the collage

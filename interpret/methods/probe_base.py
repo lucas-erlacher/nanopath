@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from sklearn.model_selection import StratifiedGroupKFold
 from tqdm import tqdm
+from torch.profiler import ProfilerActivity, profile  # PROF
 
 from interpret.data import DeviceLoader
 
@@ -189,8 +190,9 @@ class Probe:
         t_fold = time.perf_counter()  # PROF
         for epoch in range(self._cfg["epochs"]):
             last_epoch = epoch == self._cfg["epochs"] - 1
-            t_epoch = time.perf_counter(); p = {key: 0.0 for key in ("train_wait", "train_prepare", "train_models", "val_wait", "val_prepare", "val_models", "val_collect")}  # PROF
+            t_epoch = time.perf_counter(); p = {key: 0.0 for key in ("train_wait", "train_prepare", "train_models", "train_forward", "train_loss", "train_backward", "train_step", "val_wait", "val_prepare", "val_models", "val_collect")}  # PROF
             tw0, tx0, vw0, vx0 = train_loader.time_workers, train_loader.time_transfer, val_loader.time_workers, val_loader.time_transfer  # PROF
+            profiling = epoch == 0 and fold == 0 and layer_name == self.layer_names[0]; prof_batch = 0; profiler = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA])  # PROF
             # train epoch
             batch_losses = [[] for _ in models]  # per model, the loss of every batch
             torch.cuda.synchronize(); t_mark = time.perf_counter()  # PROF
@@ -198,17 +200,27 @@ class Probe:
                 t_got = time.perf_counter(); p["train_wait"] += t_got - t_mark  # PROF
                 inputs, targets = self._call_prepare_batch(batch, variant, fold_statistics)
                 torch.cuda.synchronize(); t_prep = time.perf_counter(); p["train_prepare"] += t_prep - t_got  # PROF
+                prof_batch += 1  # PROF
+                if profiling and prof_batch == 4: torch.cuda.synchronize(); profiler.start()  # PROF
 
                 # forward and backward passes of every model on this batch
                 for model_index, model in enumerate(models):
+                    torch.cuda.synchronize(); t_a = time.perf_counter()  # PROF
                     outputs = model(inputs)
+                    torch.cuda.synchronize(); t_b = time.perf_counter(); p["train_forward"] += t_b - t_a  # PROF
                     loss = self._call_loss(outputs, targets, fold_statistics, True)  # the training loss
                     assert loss.shape == ()
                     optimizers[model_index].zero_grad()
+                    torch.cuda.synchronize(); t_c = time.perf_counter(); p["train_loss"] += t_c - t_b  # PROF
                     loss.backward()
+                    torch.cuda.synchronize(); t_d = time.perf_counter(); p["train_backward"] += t_d - t_c  # PROF
                     optimizers[model_index].step()
+                    torch.cuda.synchronize(); p["train_step"] += time.perf_counter() - t_d  # PROF
                     batch_losses[model_index].append(loss.detach())
                 torch.cuda.synchronize(); t_mark = time.perf_counter(); p["train_models"] += t_mark - t_prep  # PROF
+                if profiling and prof_batch == 5:  # PROF
+                    profiler.stop()  # PROF
+                    print(profiler.key_averages().table(sort_by="self_device_time_total", row_limit=25, max_name_column_width=50))  # PROF
 
             # track loss (train) trajactory during training
             for model_index in range(len(models)):
@@ -244,7 +256,7 @@ class Probe:
                     assert val_loss.shape == ()
                     val_losses[model_index].append(val_loss.item())
             torch.cuda.synchronize(); meminfo = dict(line.split(":") for line in open("/proc/meminfo").read().splitlines())  # PROF
-            print(f"[prof] {layer_name} {variant} fold {fold} epoch {epoch}: total {time.perf_counter() - t_epoch:.1f}s | train: wait {p['train_wait']:.1f} (workers {train_loader.time_workers - tw0:.1f}, transfer {train_loader.time_transfer - tx0:.1f}) prepare {p['train_prepare']:.1f} models {p['train_models']:.1f} | val: wait {p['val_wait']:.1f} (workers {val_loader.time_workers - vw0:.1f}, transfer {val_loader.time_transfer - vx0:.1f}) prepare {p['val_prepare']:.1f} models {p['val_models']:.1f} collect {p['val_collect']:.1f} | RAM available {int(meminfo['MemAvailable'].split()[0]) / 1e6:.1f} GB, page cache {int(meminfo['Cached'].split()[0]) / 1e6:.1f} GB | GPU max allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")  # PROF
+            print(f"[prof] {layer_name} {variant} fold {fold} epoch {epoch}: total {time.perf_counter() - t_epoch:.1f}s | train: wait {p['train_wait']:.1f} (workers {train_loader.time_workers - tw0:.1f}, transfer {train_loader.time_transfer - tx0:.1f}) prepare {p['train_prepare']:.1f} models {p['train_models']:.1f} (forward {p['train_forward']:.1f}, loss {p['train_loss']:.1f}, backward {p['train_backward']:.1f}, step {p['train_step']:.1f}) | val: wait {p['val_wait']:.1f} (workers {val_loader.time_workers - vw0:.1f}, transfer {val_loader.time_transfer - vx0:.1f}) prepare {p['val_prepare']:.1f} models {p['val_models']:.1f} collect {p['val_collect']:.1f} | RAM available {int(meminfo['MemAvailable'].split()[0]) / 1e6:.1f} GB, page cache {int(meminfo['Cached'].split()[0]) / 1e6:.1f} GB | GPU max allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")  # PROF
 
         # final evaluation: the models have not changed since the validation of the last epoch, so what that pass collected is the final result
         t_final = time.perf_counter()  # PROF
