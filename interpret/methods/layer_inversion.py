@@ -22,11 +22,11 @@ class LinearDecoder(torch.nn.Module):
         self.num_patches = num_patches
         self.image_side_length = image_side_length
         
-        assert self.patches_per_side ** 2 == num_patches, f"{num_patches} patches do not form a square grid"  # isqrt rounds down silently
         self.patches_per_side = math.isqrt(num_patches)  # patches per row and per column
+        assert self.patches_per_side ** 2 == num_patches, f"{num_patches} patches do not form a square grid"  # isqrt rounds down silently
 
-        assert image_side_length % self.patches_per_side == 0, f"the image side length {image_side_length} is not a multiple of the {self.patches_per_side} patches per side"  # a patch is a whole number of pixels
         self.patch_side_length = image_side_length // self.patches_per_side  # ensured to divide cleanly
+        assert image_side_length % self.patches_per_side == 0, f"the image side length {image_side_length} is not a multiple of the {self.patches_per_side} patches per side"  # a patch is a whole number of pixels
         
         self.num_image_channels = num_image_channels
         self.head = torch.nn.Linear(token_channel_dim, num_image_channels * self.patch_side_length * self.patch_side_length)  # turns one token into one patch
