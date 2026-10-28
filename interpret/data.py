@@ -2,7 +2,6 @@
 # ActivationDataset serves one layer of an extraction (whole small blocks with get_block, examples with __getitem__) and DeviceLoader batches its examples and moves every batch to the device.
 
 import json
-import time  # PROF
 from pathlib import Path
 
 import torch
@@ -68,20 +67,14 @@ class DeviceLoader(torch.utils.data.DataLoader):
             torch.utils.data.Subset(dataset, indices), batch_size=batch_size, shuffle=shuffle, generator=generator,
             num_workers=num_workers, persistent_workers=num_workers > 0, multiprocessing_context="fork" if num_workers > 0 else None,
         )
-        self.time_workers = 0.0  # PROF: seconds spent waiting for the worker processes to deliver a batch
-        self.time_transfer = 0.0  # PROF: seconds spent copying the batches to the device
 
     def __iter__(self):
         # STEP 1 (in the base DataLoader, in its workers): 
         # the workers call __getitem__ for the examples of a batch and collate them, 
         # so every pass of this loop receives one collated CPU batch (the workers keep preparing the next batches in the background)
-        t_resume = time.perf_counter()  # PROF
         for cpu_batch in super().__iter__():
-            t_received = time.perf_counter(); self.time_workers += t_received - t_resume  # PROF
             # STEP 2 (here, in the main process): 
             # send the collated CPU batch to the device, which the workers cannot do. The batch is a nested dict 
             # (labels is a dict inside it), and tree_map applies the function to every tensor at any depth, so one call moves all of it
             device_batch = torch.utils._pytree.tree_map(lambda tensor: tensor.to(self._device), cpu_batch)
-            torch.cuda.synchronize(); self.time_transfer += time.perf_counter() - t_received  # PROF
             yield device_batch
-            t_resume = time.perf_counter()  # PROF
