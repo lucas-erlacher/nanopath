@@ -4,6 +4,8 @@
 # Inlining the hooks of LinearProbe into this class gives the code the linear probe had before it was split.
 
 import inspect
+import os  # PROF
+import time  # PROF
 
 import numpy as np
 import torch
@@ -184,12 +186,18 @@ class Probe:
 
         train_losses = [[] for _ in models]  # per model, one value per epoch
         val_losses = [[] for _ in models]
+        t_fold = time.perf_counter()  # PROF
         for epoch in range(self._cfg["epochs"]):
             last_epoch = epoch == self._cfg["epochs"] - 1
+            t_epoch = time.perf_counter(); p = {key: 0.0 for key in ("train_wait", "train_prepare", "train_models", "val_wait", "val_prepare", "val_models", "val_collect")}  # PROF
+            tw0, tx0, vw0, vx0 = train_loader.time_workers, train_loader.time_transfer, val_loader.time_workers, val_loader.time_transfer  # PROF
             # train epoch
             batch_losses = [[] for _ in models]  # per model, the loss of every batch
+            torch.cuda.synchronize(); t_mark = time.perf_counter()  # PROF
             for batch in train_loader:
+                t_got = time.perf_counter(); p["train_wait"] += t_got - t_mark  # PROF
                 inputs, targets = self._call_prepare_batch(batch, variant, fold_statistics)
+                torch.cuda.synchronize(); t_prep = time.perf_counter(); p["train_prepare"] += t_prep - t_got  # PROF
 
                 # forward and backward passes of every model on this batch
                 for model_index, model in enumerate(models):
@@ -200,6 +208,7 @@ class Probe:
                     loss.backward()
                     optimizers[model_index].step()
                     batch_losses[model_index].append(loss.detach())
+                torch.cuda.synchronize(); t_mark = time.perf_counter(); p["train_models"] += t_mark - t_prep  # PROF
 
             # track loss (train) trajactory during training
             for model_index in range(len(models)):
@@ -211,8 +220,11 @@ class Probe:
             with torch.no_grad():
                 batch_losses = [[] for _ in models]
                 evaluation_state = self._call_start_evaluation_collection(len(models), fold_statistics)  # collected for the metrics of the last epoch
+                torch.cuda.synchronize(); t_mark = time.perf_counter()  # PROF
                 for batch in val_loader:
+                    t_got = time.perf_counter(); p["val_wait"] += t_got - t_mark  # PROF
                     inputs, targets = self._call_prepare_batch(batch, variant, fold_statistics)
+                    torch.cuda.synchronize(); t_prep = time.perf_counter(); p["val_prepare"] += t_prep - t_got  # PROF
 
                     # forward pass of every model
                     outputs_per_model = []
@@ -222,16 +234,22 @@ class Probe:
                         assert loss.shape == ()
                         batch_losses[model_index].append(loss)
                         outputs_per_model.append(outputs)
+                    torch.cuda.synchronize(); t_models = time.perf_counter(); p["val_models"] += t_models - t_prep  # PROF
                     self._call_collect_evaluation_batch(evaluation_state, outputs_per_model, targets, variant, layer_name, fold, setting_names, last_epoch)
+                    torch.cuda.synchronize(); t_mark = time.perf_counter(); p["val_collect"] += t_mark - t_models  # PROF
                 
                 # track loss (validation) trajactory during training
                 for model_index in range(len(models)):
                     val_loss = torch.stack(batch_losses[model_index]).mean()  # mean of the batch losses: the smaller last batch is over-weighted here (accepted, the loss curve is a diagnostic; the final metrics do account for it)
                     assert val_loss.shape == ()
                     val_losses[model_index].append(val_loss.item())
+            torch.cuda.synchronize(); meminfo = dict(line.split(":") for line in open("/proc/meminfo").read().splitlines())  # PROF
+            print(f"[prof] {layer_name} {variant} fold {fold} epoch {epoch}: total {time.perf_counter() - t_epoch:.1f}s | train: wait {p['train_wait']:.1f} (workers {train_loader.time_workers - tw0:.1f}, transfer {train_loader.time_transfer - tx0:.1f}) prepare {p['train_prepare']:.1f} models {p['train_models']:.1f} | val: wait {p['val_wait']:.1f} (workers {val_loader.time_workers - vw0:.1f}, transfer {val_loader.time_transfer - vx0:.1f}) prepare {p['val_prepare']:.1f} models {p['val_models']:.1f} collect {p['val_collect']:.1f} | RAM available {int(meminfo['MemAvailable'].split()[0]) / 1e6:.1f} GB, page cache {int(meminfo['Cached'].split()[0]) / 1e6:.1f} GB | GPU max allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")  # PROF
 
         # final evaluation: the models have not changed since the validation of the last epoch, so what that pass collected is the final result
+        t_final = time.perf_counter()  # PROF
         metrics = self._call_final_evaluation(evaluation_state, variant, layer_name, fold, setting_names, fold_statistics)
+        print(f"[prof] {layer_name} {variant} fold {fold}: final_evaluation {time.perf_counter() - t_final:.1f}s, the training of the whole fold {t_final - t_fold:.1f}s")  # PROF
         results_per_setting = {}
         for model_index, setting_name in enumerate(setting_names):
             results_per_setting[setting_name] = (metrics[setting_name], train_losses[model_index], val_losses[model_index])
@@ -240,6 +258,7 @@ class Probe:
 
     def run(self):
         variants_results = {}
+        print(f"[prof] cpus {os.cpu_count()}, torch threads {torch.get_num_threads()}, gpu {torch.cuda.get_device_name()}, num_workers {self._cfg['num_workers']}, batch_size {self._cfg['batch_size']}, epochs {self._cfg['epochs']}")  # PROF
 
         for variant in self.variants:
             variants_results[variant] = {}
@@ -256,7 +275,9 @@ class Probe:
                 # train all folds for all grid positions
                 for fold, (train_indices, val_indices) in enumerate(self.folds[variant]):
                     # DATA LEAKAGE PREVENTION: the statistics of the training fold only, prepare_batch() standardizes every batch of both subsets with them
+                    torch.cuda.synchronize(); t_stats = time.perf_counter()  # PROF
                     fold_statistics = self._call_fold_stats(dataset, variant, train_indices)
+                    torch.cuda.synchronize(); print(f"[prof] {layer_name} {variant} fold {fold}: fold_stats {time.perf_counter() - t_stats:.1f}s")  # PROF
 
                     # train the models of all grid positions of the current fold together: the batches are fetched once and every model trains on them
                     fold_results = self.train_models_on_fold(variant, layer_name, fold, train_indices, val_indices, fold_statistics)

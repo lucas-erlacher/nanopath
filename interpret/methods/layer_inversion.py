@@ -2,6 +2,7 @@
 # It is a Probe (probe_base.py) with decoders as models, the image as target and the pixel MSE as metric: the same folds, grid, training loop and aggregation as the linear probe.
 
 import math
+import time  # PROF
 from collections import Counter
 
 import numpy as np
@@ -109,12 +110,16 @@ class LayerInversion(Probe):
     def fold_stats(self, dataset, variant, train_indices):
         loader = DeviceLoader(dataset, self.device, train_indices, self._cfg["batch_size"], num_workers=self._cfg["num_workers"])
         batches = []
+        t0 = time.perf_counter()  # PROF
         for batch in loader:
             batches.append(self._tokens_of(batch))  # (batch, 1 + num_patches, C)
+        torch.cuda.synchronize(); t1 = time.perf_counter()  # PROF
         train_tokens = torch.cat(batches, dim=0)  # (num_train_tiles, 1 + num_patches, C)
+        torch.cuda.synchronize(); t2 = time.perf_counter()  # PROF
         # one mean and std (over input samples) per token-position and within each token per channel (we will standardize each channel of each token individually)
         mean = train_tokens.mean(dim=0)  # (1 + num_patches, C)
         std = train_tokens.std(dim=0)  # (1 + num_patches, C)
+        torch.cuda.synchronize(); print(f"[prof] fold_stats detail: reading the fold {t1 - t0:.1f}s (loader workers {loader.time_workers:.1f}, transfer {loader.time_transfer:.1f}), cat {t2 - t1:.1f}s, mean and std {time.perf_counter() - t2:.1f}s")  # PROF
         # DATA LEAKAGE PREVENTION: prepare_batch() standardizes every batch of both folds with these training statistics (no leakage of validation statistics into training set)
         return {"mean": mean, "std": std, "class_weights": None}  # there are no classes
 

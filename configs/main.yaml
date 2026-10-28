@@ -151,7 +151,7 @@ interpret:
       drop_path: 0.0
     lrs: [1.0e-3, 3.0e-4] # grid
     weight_decays: [0.0] # a weight decay would also pull the output bias (which we rely on for compensating the omitted standardization of the target images)
-    epochs: 20
+    epochs: 10
     batch_size: 128
     num_workers: 8
     stratify: biological_class # metadata field the folds are stratified on
