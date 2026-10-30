@@ -130,7 +130,7 @@ interpret:
     batch_size: 128
     num_workers: 2 # image decoding only
     layer_stride: 4 # every n-th layer, counted from the last
-  methods: [layer_inversion]
+  methods: [relax]
   cka:
     max_samples: 10000 # random subset of the extracted examples (at most this many); the tables are n x n (0.1 GB each at 5,000, 0.4 GB at 10,000, 2.5 GB at 25,000)
   linear_probe:
@@ -158,3 +158,10 @@ interpret:
     leakage_group: slide_id # metadata field whose values are never split across train and validation
     folds: 2
     num_collage_rows: 8 # rows of the collage
+  relax:
+    num_masks: 500  # random masks per image (smoke run; the paper picks 3000)
+    mask_batch_size: 250
+    num_images: 2  # tiles evenly spaced through the dataset (a fixed stride, no randomness); smoke run
+    grid_side_length: 7  # inital mask size (used for sampling)
+    visible_probability: 0.5  # probability that a mask pixel is visible 
+    uncertainty_threshold_scale: 1.0  # gamma of U-RELAX: the importance is kept where the uncertainty is below gamma times its median

@@ -1,11 +1,48 @@
-# interpret/data.py: the data layer of the interpretability rig.
-# ActivationDataset serves one layer of an extraction (whole small blocks with get_block, examples with __getitem__) and DeviceLoader batches its examples and moves every batch to the device.
+# interpret/data.py: the data of the interpretability rig, in two sections.
+# SOURCE DATASETS: one class per analysis dataset, exposing `records` (image, metadata) for the sampler of the extraction.
+# ACTIVATION DATASETS: ActivationDataset serves one layer of an extraction (whole small blocks with get_block, examples with __getitem__) and DeviceLoader batches its examples and moves every batch to the device.
 
+import io
 import json
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
+from PIL import Image
 
+
+# -------------------------------------------------------------------------------------------------
+# SOURCE DATASETS
+# -------------------------------------------------------------------------------------------------
+
+# PathoROB Camelyon tiles, loaded as in probe.py's PathoROB probe. Reimplemented because that code is inline in a larger
+# function and returns only the transformed image; we also expose the metadata: slide_id, biological_class, medical_center.
+class PathoRobCamelyonDataset(torch.utils.data.Dataset):
+    def __init__(self, root):
+        table = pa.concat_tables([pq.read_table(f) for f in sorted((root / "camelyon").glob("data/*.parquet"))])
+        images = [r["bytes"] for r in table.column("image").to_pylist()]
+        metadata = table.select(["slide_id", "biological_class", "medical_center"]).to_pylist()
+        self.records = list(zip(images, metadata))
+
+    def __len__(self):
+        return len(self.records)
+
+    def __getitem__(self, index):
+        image_bytes, metadata = self.records[index]
+        return Image.open(io.BytesIO(image_bytes)).convert("RGB"), metadata
+
+
+# Builds the dataset named by `identifier`; `dataset_roots` is probe.dataset_roots from the config (name -> folder).
+def load_dataset(identifier, dataset_roots):
+    if identifier == "pathorob_camelyon":
+        return PathoRobCamelyonDataset(Path(dataset_roots["pathorob"]))
+    raise KeyError(f"Unknown dataset '{identifier}'; add it to load_dataset in interpret/data.py")
+
+
+# -------------------------------------------------------------------------------------------------
+# ACTIVATION DATASETS
+# -------------------------------------------------------------------------------------------------
 
 # One layer of an extraction (layout in README.md): row i of every file is the i-th sampled tile. The constructor sends nothing to `device`: the tensors are CPU tensors in memory
 # (the big files `patch_tokens` and `image` are memory-mapped and only opened when enabled), all of them are private, and the two ways out, get_block (a whole small block) and DeviceLoader (batches, below), are the only
@@ -59,12 +96,12 @@ class ActivationDataset(torch.utils.data.Dataset):
 # A DataLoader over the examples of a dataset at `indices` that moves every batch it yields to the device. This is the one place that moves batches: workers cannot use the GPU, so they stack the examples on the CPU
 # and each batch is moved here, in the main process, with one copy per tensor (instead of per example, which is slow).
 class DeviceLoader(torch.utils.data.DataLoader):
-    def __init__(self, dataset, device, indices, batch_size, shuffle=False, generator=None, num_workers=0):
+    def __init__(self, dataset, device, indices, batch_size, shuffle=False, num_workers=0):
         self._device = device
         # a Subset is a lazy view of the examples: it only holds the dataset and the indices (no data is copied or loaded), and reads an example from the dataset when it is fetched
         # "fork" as in the extraction: Python 3.14 defaults to "forkserver", which pickles the dataset to every worker; persistent workers survive between epochs
         super().__init__(  
-            torch.utils.data.Subset(dataset, indices), batch_size=batch_size, shuffle=shuffle, generator=generator,
+            torch.utils.data.Subset(dataset, indices), batch_size=batch_size, shuffle=shuffle,
             num_workers=num_workers, persistent_workers=num_workers > 0, multiprocessing_context="fork" if num_workers > 0 else None,
         )
 

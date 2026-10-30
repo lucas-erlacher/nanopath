@@ -1,29 +1,38 @@
-# Interpretability rig
+# Interpretability module
 
 `python -m interpret.interpret configs/main.yaml` (from the repo root) reads the `interpret:` block of the config: it
 extracts the hooked activations of a seeded, stratified sample of a dataset into files (one `ActivationDataset` per layer, see Output), then runs the configured
-`methods` on them and saves their results and plots. Everything runs on one device, the GPU: `main()` picks it, moves the model and gives it to the datasets, whose `get_block` and the `DeviceLoader` (both in `data.py`) are the only places that move data to it,
+`methods` on them and saves their results and plots. Everything runs on one device, the GPU: `main()` picks it, moves the model and gives it to the activation datasets, whose `get_block` and the `DeviceLoader` (both in `data.py`) are the only places that move data to it,
 so the methods never move data themselves. A run needs a GPU, a
 Nanopath checkpoint (it carries its training `config`, its `step` and the `model_ema`/`model` weights),
 and `probe.dataset_roots` pointing at the data.
 
+**SECTIONS**:
+- [Methods](#methods)
+- [Config](#config-interpret-in-configsmainyaml)
+- [Output](#output)
+- [Hook contract](#hook-contract)
+- [Your to-do list to analyse a new model](#your-to-do-list-to-analyse-a-new-model)
+- [Extending the rig](#extending-the-rig)
+- [Notes](#notes)
+
 ## Methods
 
-Each method below has its own subsection: the papers behind it, the questions its results can answer and the author's
-notes on the implementation. What a method computes is in its code (`interpret/methods/<method>.py`).
+Each method below has its own subsection: the questions its results can answer first, then the papers behind it and the author's
+notes on the paper(s). What a method computes is in its code (`interpret/methods/<method>.py`).
 
 ### effective_rank
-
-Papers:
-- [Roy & Vetterli 2007](https://infoscience.epfl.ch/record/110188): introduced the effective rank (ER) definition.
-- [RankMe, Garrido et al. 2022](https://arxiv.org/abs/2210.02885): applied it in the context of modern SSL.
 
 Questions this method answers:
 1. How many of its dimensions does each layer effectively use, and how does that change with depth (separately for the mean-over-patch-tokens and the CLS vector)?
 2. [From the RankMe paper, not yet validated in our context] Is ER a label-free proxy for downstream performance
    (i.e. we could try to correlate it with our obtained downstream scores in an effort to test the 2022 paper's premise in our context of ViT in DP)?
 
-Notes on the implementation:
+Papers:
+- [Roy & Vetterli 2007](https://infoscience.epfl.ch/record/110188): introduced the effective rank (ER) definition.
+- [RankMe, Garrido et al. 2022](https://arxiv.org/abs/2210.02885): applied it in the context of modern SSL.
+
+Notes on the paper(s):
 - Rank of embeddings collected for a certain layer across datapoints tells us "how many of its dimensions is this layer actually occupying".
   It will very rarely be the case that one embedding is an exact linear combination of other collected embeddings (analogously it will very rarely
   be the case that a singular value of the embedding matrix will be exactly zero), i.e. the rank of a real world embedding matrix will almost always
@@ -37,15 +46,17 @@ Notes on the implementation:
 
 ### cka
 
-Papers:
-- [Kornblith et al. 2019](https://arxiv.org/abs/1905.00414): centered kernel alignment (CKA) for comparing layers of neural networks (Section 3: the definition, Section 2: why these invariances, Section 6.1: sanity check).
-
 Question this method answers: 
 - given layer A and layer B, how similar is the *structure* of their embedding spaces, i.e. do the two layers organize the examples in the same way?
 
-What the paper improves on: earlier layer-comparison indexes (CCA and relatives) are invariant to any invertible linear transformation, which the paper argues makes them unable to measure meaningful similarity once a layer is at least as wide as the number of examples (and ignores the scale of directions, which is consistent across networks); CKA is invariant only to rotations and uniform scaling. In the paper's sanity check on CNNs it finds the matching layers of networks trained from different initializations, unlike the other indexes; on Transformers (equal widths, like our ViT) all indexes pass it, but CCA misses feature-scale differences between attention and feed-forward sublayers.
+Papers:
+- [Kornblith et al. 2019](https://arxiv.org/abs/1905.00414): centered kernel alignment (CKA) for comparing layers of neural networks (Section 3: the definition, Section 2: why these invariances, Section 6.1: sanity check).
 
-Notes on the implementation:
+Notes on the paper(s):
+
+earlier layer-comparison indexes (CCA and relatives) are invariant to any invertible linear transformation, which the paper argues makes them unable to measure meaningful similarity once a layer is at least as wide as the number of examples (and ignores the scale of directions, which is consistent across networks); CKA is invariant only to rotations and uniform scaling. In the paper's sanity check on CNNs it finds the matching layers of networks trained from different initializations, unlike the other indexes; on Transformers (equal widths, like our ViT) all indexes pass it, but CCA misses feature-scale differences between attention and feed-forward sublayers.
+
+Summary of the derivation of the CKA formula:
 
 | Derivation steps for CKA (done in the paper) | Matrix notation |
 |---|---|
@@ -75,30 +86,55 @@ Questions this method answers:
 
 ### layer_inversion
 
+Questions this method answers:
+- How much of the tile (colour, layout, texture, biological structures) can a decoder rebuild from each layer, and how does this change with depth?
+- Is the tile information of a layer local to each patch-token or does it depend on the other patch-tokens? The linear decoder sees only the token of its own patch (the local baseline), the transformer decoder exchanges information between all tokens, so the gap between them is the share that needs context (it also contains the effect of the transformer's nonlinearity).
+
 Papers:
+- An extensive survey of the field with more relevant papers is in `layer_inversion_literature.md`. 
 - [Dosovitskiy & Brox 2016](https://arxiv.org/abs/1506.02753): a decoder trained per layer to rebuild the input image from that layer's activations.
 - [He et al. 2022 (MAE)](https://arxiv.org/abs/2111.06377): the per-patch linear head and the transformer decoder on ViT tokens.
 - [Xu et al. 2020](https://arxiv.org/abs/2002.10689): why a reconstruction measures the information a given decoder family can extract, and not all the information of the layer.
-- The survey of the field is in `layer_inversion_literature.md` and the settled design in `layer_inversion_spec.md`.
+
+### relax
 
 Questions this method answers:
-- How much of the tile (colour, layout, texture) can a decoder rebuild from each layer, and how does this change with depth?
-- Is the tile information of a layer local to each patch-token or does it depend on the other patch-tokens? The linear decoder sees only the token of its own patch (the local baseline), the transformer decoder exchanges information between all tokens, so the gap between them is the share that needs context (it also contains the effect of the transformer's nonlinearity).
+- Which regions of an image does its embedding depend on?
+
+Papers:
+- [Wickstrøm et al. 2023 (RELAX)](https://arxiv.org/abs/2112.10161): attributes an embedding, not a class score, to the regions of its input image: mask the image, embed it again and compare to the original embedding with cosine similarity.
+- [Petsiuk et al. 2018 (RISE)](https://arxiv.org/abs/1806.07421): the random-mask attribution for classifiers that RELAX adapts. The masking scheme comes from here.
+
+Notes on the paper(s):
+
+The "black-box" argument of RISE (forward passes only, no gradients) separates it from gradient saliency methods. 
+
+RELAX takes the scheme from RISE and gives almost no argument of its own; this is one row per design decision of the masks and what the papers give as the reason:
+
+| Design decision of the masks | Justification in the papers |
+|---|---|
+| The similarity is weighted by the mask value of the pixel: R_ij = E_M[s(h, h') · M_ij] (RELAX Eq. 1) | Credit assignment: every mask achieves one similarity score (high = the embedding stayed close to the original), and that score, high or low, flows into the pixels in proportion to how little the mask tampered with them (M_ij = 1 untouched, 0 hidden). A pixel the mask hid gets nothing of it (because the original pixel value was barely/not at all present in the forward pass i.e. it could not affect the result of the forward pass i.e. it does not make sense to credit this pixel for the high/low similarity score the mask caused), a barely masked pixel gets almost all of it (because it's original value was largely intact i.e. that value could influence the forward pass and the resulting similarity score). |
+| Random combinations of different regions hidden at once, not one region at a time (e.g. a sliding square masking out a certain region of the image) | • Our reading: the importance of a pixel is defined as an expectation over a distribution of random masks (RISE Sec. 3.1, RELAX Equation 1). A natural estimator (computing the expectation exactly is intractable) is to sample masks from that distribution and average (= Monte Carlo). In theory a sliding window mask is also a possible outcome of that distribution, but the windows form one fixed, atypical set (one hidden block, where a typical random mask hides about half the grid) and not independent random draws. Averaging over them therefore does not converge to the expectation, it estimates a different quantity: the effect of hiding one block with everything else visible. So once the importance is defined as this expectation and approximated with Monte Carlo, the masks have to be random and not structured like a sliding window. <br>• empirically: RISE beats a sliding-window occlusion baseline (64 px windows, stride 8) on deletion and insertion for VGG16 and ResNet50 on ImageNet (Table 1).<br>• Earlier work (secondary sources, originals not read) also seems to favour random masks: LIME (2016) - switches off random subsets of superpixels at once; Shapley view - one-region occlusion is a single coalition, so a region that duplicates the evidence of another looks unimportant. Averaging over many coalitions exposes it, and since all coalitions are infeasible for images they are sampled (Kernel SHAP).<br> |
+| A low-resolution grid of 0s and 1s that is then smoothly upscaled to the image dimensions, not independently sampled mask values on the scale of the image | • Independent pixels give a huge mask space, which needs many more samples to approximate the expectation in Equation 1 of the RELAX paper  (RISE Sec. 3.2, RELAX Sec. 3.1).<br>• Sharp changes of single pixels may act as adversarial noise. Smooth (bilinear) upscaling does not introduce sharp edges, which avoids this and also gives a smooth importance map (RISE Sec. 3.2).<br>• Without it, smooth masks covering different portions of the image are hard to create (RELAX Sec. 3.1). |
+| The upscaled mask is one grid square larger than the image, and an image-sized window is cut out of it at a random position (instead of always at the same corner), which shifts the mask randomly against the image | • RISE: the masks are shifted by a random number of pixels "to allow more flexible masking" (Sec. 3.2).<br>• RELAX: describes the same step as cropping the mask "randomly" and gives no reason why the position is random and not fixed (Sec. 3.1). |
+| 7×7 grid, 224 px images, p = 0.5 | Chosen empirically. RISE uses equal probability for 0 and 1 (Sec. 4.2), RELAX follows an earlier work for the grid (Sec. 5) and never states p. |
+| Number of masks | RISE chose it empirically (4000 for VGG16, 8000 for ResNet50). RELAX uses 3000, justified by an estimation-error bound (Theorem 1) that the authors call loose. |
 
 ## Config (`interpret:` in `configs/main.yaml`)
 
 - `checkpoint_path`, `model_weights` (the checkpoint key: `model_ema` for the teacher, `model` for the student): the model to analyse.
-- `dataset` + `datasets.<id>.stratification_dimension`: one dataset per run (classes in `datasets.py`). Available:
+- `dataset` + `datasets.<id>.stratification_dimension`: one dataset per run (classes in the source-dataset section of `data.py`). Available:
   `pathorob_camelyon` (PathoROB Camelyon tiles, root `probe.dataset_roots.pathorob`), with the metadata fields
   `biological_class`, `medical_center` and `slide_id` to stratify by. The sampler is sklearn's `resample` with
   `replace=False` and `stratify=`: a seeded subsample that keeps the proportions of the stratification dimension.
   `num_samples` must be smaller than the dataset size.
-- `seed`: the one seed of the interpret config. It seeds the extraction sampler, CKA's random subset and, via `set_seeds`, every random number generator plus deterministic GPU mode (an operation without a deterministic implementation raises an error).
+- `seed`: the one seed of the interpret config. `set_seeds` in `main()` sets it once for every random number generator, plus deterministic GPU mode (an operation without a deterministic implementation raises an error), and nothing else in the rig seeds, with one exception: the fold splitter of `Probe`, so that all variants of a method share their folds (the seeding policy is at the `set_seeds` call in `interpret.py`).
 - `extract.{num_samples, batch_size, num_workers, layer_stride}`: `layer_stride` keeps every n-th
   layer counted from the last (the last is always kept); `num_workers` only parallelizes image decoding.
-- `methods`: the methods to run (`effective_rank`, `cka`, `linear_probe`, `layer_inversion`); `cka.max_samples` caps the examples CKA uses (a seeded random subset, label-free so not exactly stratified), because its similarity tables are n × n (0.1 GB each at 5,000 examples, 0.4 GB at 10,000, 2.5 GB at 25,000); the other methods use all extracted examples.
+- `methods`: the methods to run (`effective_rank`, `cka`, `linear_probe`, `layer_inversion`, `relax`); `cka.max_samples` caps the examples CKA uses (a seeded random subset, label-free so not exactly stratified), because its similarity tables are n × n (0.1 GB each at 5,000 examples, 0.4 GB at 10,000, 2.5 GB at 25,000); the other methods use all extracted examples.
 - `linear_probe`: `targets` (what to predict: the metadata fields and the labels derived from the tile pixels, `brightness`, `tissue_brightness`, `tissue_fraction`, `hematoxylin` and `eosin`, each cut into 4 quantile bins), `lrs` and `weight_decays` (the grid), `epochs`, `batch_size`, `num_workers` (the DataLoader worker processes that fetch the batches), `leakage_group` (the metadata field whose values are never split across train and validation, `slide_id` for PathoROB) and `folds` (a `StratifiedGroupKFold` on that field).
 - `layer_inversion`: `decoders` (`linear`: one linear head shared by all patch tokens, `transformer`: transformer blocks over the CLS and patch tokens, then the same head), `transformer` (the settings of that decoder: `depth` and, per `Block`, `head_dim`, `mlp_ratio` and `drop_path`), `lrs` and `weight_decays` (the grid), `epochs`, `batch_size`, `num_workers`, `num_collage_rows` (the rows of the collage), `stratify` (the metadata field the folds are stratified on), `leakage_group` and `folds` (as for the probe). The decoders train on the patch tokens and the images of every layer, so the datasets are opened with `patch_tokens=True, image=True`.
+- `relax`: `num_masks` (random masks per image), `mask_batch_size` (masked images per forward pass), `num_images` (tiles evenly spaced through the dataset, a fixed stride with no randomness, so every run and every checkpoint is analysed on the same tiles), and the paper's settings `grid_side_length` (the masks start as a grid of that many squares per side), `visible_probability` (of a grid square) and `uncertainty_threshold_scale` (gamma of U-RELAX: the importance is kept where the uncertainty is below gamma times its median). RELAX runs the model itself on masked copies of the images, so unlike the other methods it does not read the extraction: it gets the model, the source dataset and the extraction's transform (the tile in [0, 1] and the normalised model input) from `main()`.
 
 Storage per sample is `kept_layers x 257 tokens x C x 4 bytes` (float32) plus the 0.6 MB input image; for ViT-S (C=384)
 that is about 3.4 MB at stride 2 and 2.2 MB at stride 4, so 10,000 samples take about 34 GB / 22 GB on disk. The extraction holds everything in RAM before saving it
@@ -122,13 +158,13 @@ output_dir/                      # from the config
       config.json                # the full config that produced these files, written right after a fresh extraction
 results_dir/                     # from the config, independent of output_dir (e.g. the extraction on node-local storage and the results on Drive)
   <hash>_<methods>/            # one folder per extraction and set of methods (sorted by name), e.g. 8707bab631_cka_effective_rank
-    results.json               # the results of all methods
+    results.pt                 # the results of all methods: their outputs (the final numbers, curves, images and maps, not the intermediates), read with torch.load(path, weights_only=False)
     dashboard.html             # the whole run on one page, to open with a double click (see below)
     config.json                # the full config of the last run that wrote this folder
-    <method>/                  # the plots that method defines, e.g. cka/patch_mean_cka.png, effective_rank/patch_mean_effective_rank.png, layer_inversion/error.png and layer_inversion/collage.png
+    <method>/                  # the plots that method defines, e.g. cka/patch_mean_cka.png, effective_rank/patch_mean_effective_rank.png, layer_inversion/error.png, layer_inversion/collage.png and relax/image_<index>.png (one per analysed image)
 ```
 
-At the end of a run, `write_dashboard` (`utils.py`) writes `dashboard.html` into the results folder: the settings of the run, then for every method its plots (embedded in the file, so it can be moved or sent around) and the parts of its subsection of this README (papers, question, what the paper improves on, notes) as toggles. It splits a method's subsection at the lines starting with `Papers`, `Question`, `What the paper improves on` and `Notes on the implementation`.
+At the end of a run, `write_dashboard` (`utils.py`) writes `dashboard.html` into the results folder: the settings of the run, then for every method its plots (embedded in the file, so it can be moved or sent around) and the parts of its subsection of this README (papers, question, what the paper improves on, notes) as toggles. It splits a method's subsection at the lines starting with `Papers`, `Question`, `What the paper improves on` and `Notes on the paper(s)`.
 
 Row `i` of every file is the `i`-th sampled tile (`sampled_dataset_indices` in `info.json`), so the vectors, the image and the labels of an example sit at the same index by construction.
 Methods read one layer through `ActivationDataset(data_dir, layer, device)`, a `torch.utils.data.Dataset`: the constructor sends nothing to the device: the small tensors (`cls`, `patch_mean`, labels) are CPU tensors in memory, the two big files (`patch_tokens`, `image`) are opened only when enabled and memory-mapped (nothing is read until an item is fetched). Data leaves the dataset in two ways and both move it to the device (`__getitem__` itself returns one example as CPU tensors): `get_block(field, key)` returns a whole small block (`field` names a dict of the dataset, `"activations"` or `"labels"`, and `key` picks the block in it: `get_block("activations", "cls")`, `get_block("labels", "medical_center")`; what methods that need a whole layer or fold read; the big blocks are refused, they are memory-mapped so that they are never loaded whole), and `DeviceLoader(dataset, device, indices, batch_size, ...)` from `data.py` (a `DataLoader` over those examples that yields batches already on the device, the only way to read the big blocks, in batches)
@@ -179,16 +215,18 @@ Nothing else in the rig needs to change.
 
 ## Extending the rig
 
-- New dataset: a class in `datasets.py` that takes its root folder as an argument (`load_dataset` passes it from
+- New dataset: a class in the source-dataset section of `data.py` that takes its root folder as an argument (`load_dataset` passes it from
   `probe.dataset_roots`; `probe.py`'s loaders are the precedent), returns `(PIL image, metadata dict)` and exposes
   `records`, a list of `(image, metadata)` per sample (the sampler stratifies over `metadata[stratification_dimension]`);
   add it to `load_dataset` and a block under `datasets:` in the config.
-- New method: a class in its own file in `interpret/methods/`, `Method(datasets)` (`Method(datasets, device)` if it builds its own modules, like the probe's model; a method that trains models on folds subclasses `Probe` in `probe_base.py` and implements its hooks, like `linear_probe.py` and `layer_inversion.py` (the hooks, their arguments, and what is asserted about them and what is not are documented in `probe_base.py`; not to be confused with the model hooks above); `datasets` is `{layer name: ActivationDataset}`; enable `patch_tokens` or `image` on a dataset if the method needs token-level data or images) with `run()`, which stores a nested dict of
-  plain numbers in `self.results`, and `plot()`, which returns `{file name: matplotlib Figure}` built from `self.results`
+- New method: a class in its own file in `interpret/methods/`, `Method(activation_datasets)` (`Method(activation_datasets, device)` if it builds its own modules, like the probe's model; a method that trains models on folds subclasses `Probe` in `probe_base.py` and implements its hooks, like `linear_probe.py` and `layer_inversion.py` (the hooks, their arguments, and what is asserted about them and what is not are documented in `probe_base.py`; not to be confused with the model hooks above); `activation_datasets` is `{layer name: ActivationDataset}`; enable `patch_tokens` or `image` on a dataset if the method needs token-level data or images) with `run()`, which stores the outputs of the method in `self.results`
+  (plain Python values, dicts, lists and CPU tensors, the results contract in `main()`), and `plot()`, which returns `{file name: matplotlib Figure}` built from `self.results`
   (`main()` saves the figures); add it to the dispatch in `main()` and an entry in `methods` in the config (a method with tunables gets its own config sub-block, passed to its constructor in the dispatch), and a subsection under
-  Methods here (the papers behind it, the questions it answers, notes on the implementation).
+  Methods here (the questions it answers, the papers behind it, notes on the paper(s)).
 
 ## Notes
 
 The model input uses probe.py's eval transform plus the normalization that probe.py applies at its model-call sites
 (`evaluation_preprocess` in `interpret.py`). probe.py is locked, so that normalization is duplicated: keep the two in sync.
+
+**Reference run: the pretrained initialization.** Nanopath training starts from Meta's pretrained DINOv2 weights, so that checkpoint is the natural reference for every interpretability method. Run it with the same dataset, seed and extraction settings as the fine-tuned checkpoints, so that all runs see the same tiles. Comparing the two isolates what the pathology training changed: which layers keep or lose pixel information, how the representation geometry moved, and where the model looks. This is a controlled before/after (same architecture, same starting weights), but it shows what changed, not whether the change is good. That is for the probes and downstream benchmarks to say.

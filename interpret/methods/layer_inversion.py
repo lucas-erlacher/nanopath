@@ -1,4 +1,4 @@
-# interpret/methods/layer_inversion.py: layer inversion: a decoder per layer rebuilds the tile from the tokens of that layer (the spec: layer_inversion_spec.md, the question: README.md).
+# interpret/methods/layer_inversion.py: layer inversion: a decoder per layer rebuilds the tile from the tokens of that layer (the question: README.md).
 # It is a Probe (probe_base.py) with decoders as models, the image as target and the pixel MSE as metric: the same folds, grid, training loop and aggregation as the linear probe.
 
 import math
@@ -80,21 +80,21 @@ class LayerInversion(Probe):
     BEST = min
     VARIANTS_KEY = "decoders"
 
-    def __init__(self, datasets, device, seed, method_cfg):
-        super().__init__(datasets, device, seed, method_cfg, variants=method_cfg["decoders"])
+    def __init__(self, activation_datasets, device, seed, method_cfg):
+        super().__init__(activation_datasets, device, seed, method_cfg, variants=method_cfg["decoders"])
         
-        first_dataset = list(datasets.values())[0]
+        first_dataset = list(activation_datasets.values())[0]
         example = first_dataset[0]  # one example as CPU tensors, only to read the shapes
         self.num_patches = example["patch_tokens"].shape[0]
         self.token_channel_dim = example["patch_tokens"].shape[1]
         self.num_image_channels = example["image"].shape[0]
         self.image_side_length = example["image"].shape[1]  # the images are square
         
-        # storage space for the collage plot
-        self.collage_originals = None  # (the collage rows, num_image_channels, H, W), the same tiles for every decoder and layer
-        self.collage_reconstructions = {}  # {(decoder, layer name): {setting name: (the collage rows, num_image_channels, H, W)}}
+        # the collage, written into the results by collect_evaluation_batch() during the run: originals (the collage rows, num_image_channels, H, W), the same tiles for every decoder and layer,
+        # positions (the collage rows,), the random positions of the tiles within that batch, and reconstructions {(decoder, layer name): {setting name: (the collage rows, num_image_channels, H, W)}}
+        self.results["collage"] = {"originals": None, "positions": None, "reconstructions": {}}
         
-        self.briefing = self.print_briefing(first_dataset)
+        self.results["briefing"] = self.print_briefing(first_dataset)
 
     # -------------------------------------------------------------------------------------------------
     # HOOKS
@@ -149,25 +149,28 @@ class LayerInversion(Probe):
         return F.mse_loss(outputs, targets)
 
     # The extra data of the final evaluation (the base tracks only the loss curves): the error of every validation tile for every model (one float per tile, the MSE over its pixels). The state of the pass of the last epoch is
-    # the final one. The collage data (random validation tiles and their reconstructions, too big to keep for all validation tiles) is written straight to the object, once, in the last epoch of fold 0.
+    # the final one. The collage data (random validation tiles and their reconstructions, too big to keep for all validation tiles) is written straight into self.results, once, in the last epoch of fold 0.
     def start_evaluation_collection(self, num_models, fold_statistics):
         return {"tile_errors": [[] for _ in range(num_models)]}  # per model, the tile errors of every batch
 
     def collect_evaluation_batch(self, evaluation_state, outputs_per_model, targets, variant, layer_name, fold, setting_names, last_epoch):
         # collage: from the first validation batch of the last epoch of fold 0, once per decoder and layer
-        if last_epoch and fold == 0 and (variant, layer_name) not in self.collage_reconstructions:
+        if last_epoch and fold == 0 and (variant, layer_name) not in self.results["collage"]["reconstructions"]:
             # fetch random input images for collage
             num_collage_rows = self._cfg["num_collage_rows"]
-            generator = torch.Generator().manual_seed(self.seed)  # the same random tiles for every decoder and layer, so all columns of the collage show the same tiles
-            collage_positions = torch.randperm(targets.shape[0], generator=generator)[:num_collage_rows].to(targets.device)  # random positions within the batch
+            # random positions within the batch, drawn once and reused for every decoder and layer, so that all columns of the collage show the same tiles (the folds are shared, see Probe)
+            if self.results["collage"]["positions"] is None:
+                permutation = torch.randperm(targets.shape[0])
+                self.results["collage"]["positions"] = permutation[:num_collage_rows]
+            collage_positions = self.results["collage"]["positions"].to(targets.device)
             selected_images = targets[collage_positions, :, :, :]  # (collage rows, num_image_channels, H, W)
-            self.collage_originals = selected_images.cpu()  # to the host, the plot needs numpy
+            self.results["collage"]["originals"] = selected_images.cpu()  # to the host, the plot needs numpy
             # fetch same random indices for reconstructed images
             reconstructions = {}
             for model_index, setting_name in enumerate(setting_names):
                 selected_outputs = outputs_per_model[model_index][collage_positions, :, :, :]  # (collage rows, num_image_channels, H, W)
                 reconstructions[setting_name] = selected_outputs.cpu()
-            self.collage_reconstructions[(variant, layer_name)] = reconstructions
+            self.results["collage"]["reconstructions"][(variant, layer_name)] = reconstructions
 
         # MSE plot
         for model_index, outputs in enumerate(outputs_per_model):
@@ -260,18 +263,18 @@ class LayerInversion(Probe):
         figures["error"] = figure
 
         columns = 1 + len(self.variants) * len(self.layer_names)  # the original, then every decoder at every layer
-        num_rows = self.collage_originals.shape[0]  # the num_collage_rows of the config, chosen in collect_evaluation_batch()
+        num_rows = self.results["collage"]["originals"].shape[0]  # the num_collage_rows of the config, chosen in collect_evaluation_batch()
         figure = Figure(figsize=(1.6 * columns, 1.6 * num_rows))
         axes = figure.subplots(num_rows, columns, squeeze=False)
         for row in range(num_rows):
-            original = self.collage_originals[row, :, :, :]  # (3, H, W)
+            original = self.results["collage"]["originals"][row, :, :, :]  # (3, H, W)
             original_channels_last = original.permute(1, 2, 0)  # (H, W, 3)
             axes[row][0].imshow(original_channels_last.clamp(0, 1).numpy())  # clipped to [0, 1] for display
             column = 1
             for decoder in self.variants:
                 for layer_name in self.layer_names:
                     best_setting = self.results[self.VARIANTS_KEY][decoder][layer_name]["best_setting"]
-                    reconstructions = self.collage_reconstructions[(decoder, layer_name)]  # {setting name: (collage rows, 3, H, W)}
+                    reconstructions = self.results["collage"]["reconstructions"][(decoder, layer_name)]  # {setting name: (collage rows, 3, H, W)}
                     reconstruction = reconstructions[best_setting][row, :, :, :]  # (3, H, W)
                     reconstruction_channels_last = reconstruction.permute(1, 2, 0)  # (H, W, 3)
                     axes[row][column].imshow(reconstruction_channels_last.clamp(0, 1).numpy())  # clipped to [0, 1] for display

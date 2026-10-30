@@ -17,8 +17,7 @@ from pathlib import Path
 from model import ViT
 from probe import worker_probe_transforms
 from dataloader import HED_FROM_RGB, rgb_to_hed
-from interpret.datasets import load_dataset
-from interpret.data import ActivationDataset
+from interpret.data import load_dataset, ActivationDataset
 from interpret.utils import write_dashboard, tissue_masks
 
 # Headless plotting (figures are only saved to files): Colab exports MPLBACKEND=<notebook backend>, which is not installed in the venv.
@@ -27,6 +26,7 @@ from interpret.methods.effective_rank import EffectiveRank
 from interpret.methods.cka import CKA
 from interpret.methods.linear_probe import LinearProbe
 from interpret.methods.layer_inversion import LayerInversion
+from interpret.methods.relax import RELAX
 
 
 # -------------------------------------------------------------------------------------------------
@@ -100,13 +100,13 @@ def derive_labels(rgb):
     return {"brightness": brightness_target, "tissue_brightness": tissue_brightness_target, "tissue_fraction": tissue_fraction, "hematoxylin": hematoxylin_target, "eosin": eosin_target}
 
 
-# Samples tiles (stratified, seeded) and writes the extraction (layout in README.md): the labels (metadata fields, plus labels derived from the pixels during the pass), then one pass of the model over the tiles that collects the activations and the images.
+# Samples tiles (stratified, from the generators seeded in main()) and writes the extraction (layout in README.md): the labels (metadata fields, plus labels derived from the pixels during the pass), then one pass of the model over the tiles that collects the activations and the images.
 # info.json is written last, so it marks a complete run. `settings` determines the files (hashed in main, saved in info.json).
 def extract_activations(model, dataset, transform, settings, extract_cfg, output_dir):
     # Seeded subsample that keeps the proportions of the dataset's stratification dimension (a metadata field).
     dimension = settings["dataset_config"]["stratification_dimension"]
     values = [metadata[dimension] for _, metadata in dataset.records]
-    sampled_indices = resample(list(range(len(dataset))), n_samples=settings["num_samples"], replace=False, stratify=values, random_state=settings["seed"])
+    sampled_indices = resample(list(range(len(dataset))), n_samples=settings["num_samples"], replace=False, stratify=values)  # draws from numpy's generator, seeded in main()
     subset = torch.utils.data.Subset(dataset, sampled_indices)
     # "fork" as in probe.py: Python 3.14 defaults to "forkserver", which pickles the dataset and the collate lambda to every worker.
     loader = torch.utils.data.DataLoader(
@@ -248,7 +248,7 @@ def set_seeds(seed):
     torch.backends.cudnn.allow_tf32 = False
 
 
-# Everything computes on ONE device (the GPU). main() picks it, moves the model and gives it to the datasets, which hold their tensors on it,
+# Everything computes on ONE device (the GPU). main() picks it, moves the model and gives it to the activation datasets, which hold their tensors on it,
 # so the methods never move data between devices.
 def main():
 
@@ -257,6 +257,11 @@ def main():
     # Usage (from the repo root): python -m interpret.interpret configs/main.yaml
     cfg = yaml.safe_load(os.path.expandvars(Path(sys.argv[1]).read_text()))
     icfg = cfg["interpret"]
+
+    # SEEDING POLICY: the one seed of the config is set here, once, for every random number generator (python, numpy, torch on the CPU and the GPU), and nothing else in the rig seeds.
+    # The extraction sampler, the methods and the libraries they call (sklearn draws from numpy's) all draw from these generators, so a run is reproduced by its config.json (the same config, so the same order of methods).
+    # only exception: the fold splitter of Probe (probe_base.py) gets the seed as random_state, so that all variants of a method share their folds (the decoders of the layer inversion are compared
+    # on the same splits, and its collage shows the same tiles in every column).
     set_seeds(icfg["seed"])  # before the first CUDA operation
     model, train_cfg, checkpoint_step = load_model(icfg["checkpoint_path"], icfg["model_weights"])
     model = model.to(device)
@@ -299,23 +304,28 @@ def main():
     results = {}
     for method_name in icfg["methods"]:
         print(f"Running {method_name}...")
-        # every method builds its own fresh datasets (one per kept layer) with exactly the blocks it needs: all data starts out on the CPU and moves to the device only when the method asks for it,
+        # every method builds its own fresh activation datasets (one per kept layer) with exactly the blocks it needs: all data starts out on the CPU and moves to the device only when the method asks for it,
         # so methods never depend on each other. 
         if method_name == "effective_rank":
-            datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
-            method = EffectiveRank(datasets)
+            activation_datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
+            method = EffectiveRank(activation_datasets)
         elif method_name == "cka":
-            datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
-            method = CKA(datasets, icfg["seed"], icfg[method_name])
+            activation_datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
+            method = CKA(activation_datasets, icfg[method_name])
         elif method_name == "linear_probe":
-            datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
-            method = LinearProbe(datasets, device, icfg["seed"], icfg[method_name])
+            activation_datasets = {layer: ActivationDataset(data_dir, layer, device) for layer in kept_layers}
+            method = LinearProbe(activation_datasets, device, icfg["seed"], icfg[method_name])
         elif method_name == "layer_inversion":
-            datasets = {layer: ActivationDataset(data_dir, layer, device, patch_tokens=True, image=True) for layer in kept_layers}  # the decoders read the patch tokens and the target images
-            method = LayerInversion(datasets, device, icfg["seed"], icfg[method_name])
+            activation_datasets = {layer: ActivationDataset(data_dir, layer, device, patch_tokens=True, image=True) for layer in kept_layers}  # the decoders read the patch tokens and the target images
+            method = LayerInversion(activation_datasets, device, icfg["seed"], icfg[method_name])
+        elif method_name == "relax":
+            method = RELAX(dataset, transform, model, device, icfg[method_name])  # RELAX runs the model itself on masked copies of the images, so it gets the source dataset and the extraction's transform instead of the extractions
         else:
             raise KeyError(f"Unknown method '{method_name}'; add it to the method dispatch in main() of interpret/interpret.py")
         method.run()
+        # THE RESULTS CONTRACT: method.results is the one container of the method's outputs, the final numbers, curves, images and maps it produces, i.e. all the data its plots show
+        # (plain Python values, dicts, lists and CPU tensors, so that pixel data is kept losslessly). It does not hold the intermediates that are only needed to compute the outputs
+        # (e.g. CKA's similarity tables, RELAX's masks, trained weights). plot() takes its data from it alone. Every method must follow this.
         results[method_name] = method.results
 
         # Each method saves the plots it defines into its own subfolder.
@@ -324,7 +334,8 @@ def main():
         for plot_name, figure in method.plot().items():
             figure.savefig(plot_dir / f"{plot_name}.png", bbox_inches="tight")
 
-    (results_dir / "results.json").write_text(json.dumps(results, indent=2))
+    # the results of all methods, saved together: the complete paper trail of the run (read it back with torch.load(path, weights_only=False), since the results also hold numpy floats)
+    torch.save(results, results_dir / "results.pt")
 
     write_dashboard(results_dir, data_dir, cfg)
     print(f"dashboard saved to: {results_dir / 'dashboard.html'}")

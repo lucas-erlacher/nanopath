@@ -30,9 +30,9 @@ class LinearProbe(Probe):
     BEST = max
     VARIANTS_KEY = "targets"
 
-    def __init__(self, datasets, device, seed, method_cfg):
-        super().__init__(datasets, device, seed, method_cfg, variants=method_cfg["targets"])
-        self.briefing = self.print_briefing(list(datasets.values())[0])
+    def __init__(self, activation_datasets, device, seed, method_cfg):
+        super().__init__(activation_datasets, device, seed, method_cfg, variants=method_cfg["targets"])
+        self.results["briefing"] = self.print_briefing(list(activation_datasets.values())[0])
 
     # -------------------------------------------------------------------------------------------------
     # HOOKS
@@ -183,7 +183,7 @@ class LinearProbe(Probe):
         lines.append("")
         lines.append("FEATURE SCALE (before standardization)")
         feature_scale = {}
-        for layer_name, dataset in self._datasets.items():
+        for layer_name, dataset in self._activation_datasets.items():
             inputs = torch.cat([dataset.get_block("activations", "cls"), dataset.get_block("activations", "patch_mean")], dim=1)  # the whole layer at once, [CLS, patch mean] like in prepare_batch
             norms = inputs.norm(dim=1)
             constant_features = int((inputs.std(dim=0) == 0).sum().item())

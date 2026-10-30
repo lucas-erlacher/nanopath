@@ -8,16 +8,16 @@ from tqdm import tqdm
 
 
 class CKA:
-    def __init__(self, datasets, seed, method_cfg):
-        self._datasets = datasets  # {layer name: ActivationDataset}, see data.py
+    def __init__(self, activation_datasets, method_cfg):
+        self._activation_datasets = activation_datasets  # {layer name: ActivationDataset}, see data.py
 
         # the n x n tables may need more RAM than the data allows, so keep a random subset of at most max_samples examples (label-free, so not exactly stratified).
         # it is drawn once, so every layer keeps the same examples.
         # a random subset of k examples from the stratified extraction shifts a class proportion p by at most about sqrt(p(1-p)/k) (an estimate: 0.7 percentage points at k = 5,000
         # for two balanced classes), so the subset stays close to stratified, especially at large max_samples.
-        first_dataset = list(datasets.values())[0]  # the datasets of all layers advertise the same number of examples and vector types
+        first_dataset = list(activation_datasets.values())[0]  # the activation datasets of all layers advertise the same number of examples and vector types
         self.vector_types = first_dataset.vector_types  # {vector type: description}
-        permutation = torch.randperm(len(first_dataset), generator=torch.Generator().manual_seed(seed))
+        permutation = torch.randperm(len(first_dataset))
         self.sampled_indices = permutation[:method_cfg["max_samples"]].tolist()
         self.results = None  # {vector type: {layer a: {layer b: CKA}}}, set by run()
 
@@ -29,7 +29,7 @@ class CKA:
             squared_lengths = {}
 
             # compute the similarity structure tables for each layer (and perform a precomputation for step 6)
-            for layer_name, dataset in tqdm(self._datasets.items(), desc=f"build similarity structure tables ({vector_type})"):  # iterate over layers, first to last
+            for layer_name, dataset in tqdm(self._activation_datasets.items(), desc=f"build similarity structure tables ({vector_type})"):  # iterate over layers, first to last
                 all_features = dataset.get_block("activations", vector_type)  # (N, C), one row per example (the whole layer, on the device)
                 features = all_features[self.sampled_indices]  # (n, C), one row per sampled example
                 num_examples = features.shape[0]

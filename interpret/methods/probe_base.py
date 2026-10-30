@@ -14,18 +14,18 @@ from interpret.data import DeviceLoader
 
 
 class Probe:
-    def __init__(self, datasets, device, seed, method_cfg, variants):
-        self._datasets = datasets  # {layer name: ActivationDataset}, see data.py
-        self.device = device  # where the models live (the datasets already hand out tensors on it)
-        self.seed = seed
+    def __init__(self, activation_datasets, device, seed, method_cfg, variants):
+        self._activation_datasets = activation_datasets  # {layer name: ActivationDataset}, see data.py
+        self.device = device  # where the models live (the activation datasets already hand out tensors on it)
+        self.seed = seed  # only for the fold splitter, the one exception to the seeding policy (main() in interpret.py)
         self._cfg = method_cfg
         self.variants = variants  # what the method varies: the targets of the linear probe, the decoders of the layer inversion. Every variant has its own folds, layer loop and results
-        self.results = None
+        self.results = {}  # the outputs of the method (the contract is in main() of interpret.py); exists from the start, so that hooks can write into it during the run
 
-        self.layer_names = list(datasets)
+        self.layer_names = list(activation_datasets)
 
         # the labels (integers) and their names are the same in the dataset of every layer, so the first one gives them all
-        first_dataset = list(datasets.values())[0]
+        first_dataset = list(activation_datasets.values())[0]
         self.labels = first_dataset.get_block("labels", to_device=False)  # all labels, they stay on the CPU: the folds (sklearn) and the briefing work on the host
         self.label_names = first_dataset.label_names
         group_ids = self.labels[self._cfg["leakage_group"]].numpy()
@@ -35,7 +35,7 @@ class Probe:
         # CLASS BALANCING
         self.folds = {}
         for variant in variants:
-            splitter = StratifiedGroupKFold(n_splits=self._cfg["folds"], shuffle=True, random_state=seed)
+            splitter = StratifiedGroupKFold(n_splits=self._cfg["folds"], shuffle=True, random_state=seed)  # the one exception to the seeding policy (main() in interpret.py): all variants share their folds
             self.folds[variant] = []
             for train_indices, val_indices in splitter.split(list(range(len(first_dataset))), self._call_stratify_labels(variant).numpy(), groups=group_ids):
                 self.folds[variant].append((train_indices.tolist(), val_indices.tolist()))
@@ -73,7 +73,7 @@ class Probe:
         raise NotImplementedError
 
     # Called for every validation batch with the outputs of every model (a list with one tensor per model); adds what the final evaluation needs to the evaluation state.
-    # `variant`, `layer_name`, `fold` and `setting_names` say what is being trained, `last_epoch` is True in the pass of the last epoch: what is only needed once (e.g. plot data) can be written to the object then.
+    # `variant`, `layer_name`, `fold` and `setting_names` say what is being trained, `last_epoch` is True in the pass of the last epoch: what is only needed once (e.g. plot data) can be written into self.results then.
     def collect_evaluation_batch(self, evaluation_state, outputs_per_model, targets, variant, layer_name, fold, setting_names, last_epoch):
         raise NotImplementedError
 
@@ -165,9 +165,8 @@ class Probe:
     # {setting name: (metrics on the validation subset after the final epoch, per-epoch train loss, per-epoch validation loss)}.
     # The validation loss is a diagnostic only. Both subsets are prepared and standardized in the same way (with the training statistics, see run()).
     def train_models_on_fold(self, variant, layer_name, fold, train_indices, val_indices, fold_statistics):
-        dataset = self._datasets[layer_name]
-        generator = torch.Generator().manual_seed(self.seed)  # one shuffling for all models, so every model sees the same batches in the same order
-        train_loader = DeviceLoader(dataset, self.device, train_indices, self._cfg["batch_size"], shuffle=True, generator=generator, num_workers=self._cfg["num_workers"])  # the training examples in a new random order every epoch, batches already on the device
+        dataset = self._activation_datasets[layer_name]
+        train_loader = DeviceLoader(dataset, self.device, train_indices, self._cfg["batch_size"], shuffle=True, num_workers=self._cfg["num_workers"])  # the training examples in a new random order every epoch, batches already on the device
         val_loader = DeviceLoader(dataset, self.device, val_indices, self._cfg["batch_size"], num_workers=self._cfg["num_workers"])
 
         # create one model and optimizer per grid position
@@ -176,7 +175,6 @@ class Probe:
         optimizers = []
         for lr in self._cfg["lrs"]:  # grid axis 1
             for weight_decay in self._cfg["weight_decays"]:  # grid axis 2
-                torch.manual_seed(self.seed)  # reseeded for every model, so all models start from the same initialization and a training does not depend on the loop order
                 model = self._call_make_model(variant, fold_statistics).to(self.device)
                 setting_names.append(self._setting_name(lr, weight_decay))
                 models.append(model)
@@ -245,7 +243,7 @@ class Probe:
             variants_results[variant] = {}
 
             for layer_name in tqdm(self.layer_names, desc=f"{self.NAME} ({variant})"):  # iterate over layers, first to last
-                dataset = self._datasets[layer_name]
+                dataset = self._activation_datasets[layer_name]
                 grid = {}
 
                 # initialize grid data structure
@@ -280,4 +278,4 @@ class Probe:
                 best_setting = self.BEST(grid, key=lambda setting: grid[setting]["mean"][self.METRICS[0]])
                 variants_results[variant][layer_name] = {"grid": grid, "best_setting": best_setting}
 
-        self.results = {"briefing": self.briefing, self.VARIANTS_KEY: variants_results}
+        self.results[self.VARIANTS_KEY] = variants_results

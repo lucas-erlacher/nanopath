@@ -6,10 +6,10 @@ from tqdm import tqdm
 
 
 class EffectiveRank:
-    def __init__(self, datasets):
-        self._datasets = datasets  # {layer name: ActivationDataset}, see data.py
-        first_dataset = list(datasets.values())[0]
-        self.vector_types = first_dataset.vector_types  # {vector type: description}, advertised by the datasets (the same in every layer)
+    def __init__(self, activation_datasets):
+        self._activation_datasets = activation_datasets  # {layer name: ActivationDataset}, see data.py
+        first_dataset = list(activation_datasets.values())[0]
+        self.vector_types = first_dataset.vector_types  # {vector type: description}, advertised by the activation datasets (the same in every layer)
         self.results = None  # {vector type: {layer: effective rank}}, set by run()
 
     def run(self):
@@ -18,7 +18,7 @@ class EffectiveRank:
         for vector_type in self.vector_types:  # iterate over vector types
             results[vector_type] = {}
 
-            for layer_name, dataset in tqdm(self._datasets.items(), desc=f"Effective rank ({vector_type})"):  # iterate over layers, first to last
+            for layer_name, dataset in tqdm(self._activation_datasets.items(), desc=f"Effective rank ({vector_type})"):  # iterate over layers, first to last
                 features = dataset.get_block("activations", vector_type)  # (n, C), one row per example (the whole layer, on the device)
 
                 # center the embedding cloud (PCA-style) so the singular values describe the variation within it, not its offset from the origin

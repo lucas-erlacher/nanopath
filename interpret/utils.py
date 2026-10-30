@@ -75,7 +75,7 @@ def write_dashboard(results_dir, data_dir, cfg):
 
         # this method's subsection of README.md, split at the lines that start one of its parts
         method_text = re.search(rf"^### {method_name}\n(.*?)(?=^##|\Z)", readme, re.S | re.M).group(1)
-        for part in re.split(r"(?m)^(?=Papers|Question|What the paper improves on|Notes on the implementation)", method_text):
+        for part in re.split(r"(?m)^(?=Papers|Question|What the paper improves on|Notes on the paper)", method_text):
             if part.strip() == "":
                 continue
             title, _, part_body = part.partition(":")
