@@ -18,10 +18,10 @@ from model import ViT
 from probe import worker_probe_transforms
 from dataloader import HED_FROM_RGB, rgb_to_hed
 from interpret.data import load_dataset, ActivationDataset
-from interpret.utils import write_dashboard, tissue_masks
 
 # Headless plotting (figures are only saved to files): Colab exports MPLBACKEND=<notebook backend>, which is not installed in the venv.
 os.environ["MPLBACKEND"] = "agg"
+from interpret.utils import write_dashboard, tissue_masks
 from interpret.methods.effective_rank import EffectiveRank
 from interpret.methods.cka import CKA
 from interpret.methods.linear_probe import LinearProbe

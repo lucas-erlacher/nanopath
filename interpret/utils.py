@@ -1,14 +1,19 @@
 # interpret/utils.py: helpers of the interpretability rig.
-# tissue_masks finds the tissue pixels of a batch of tiles. write_dashboard builds the self-contained dashboard.html of a run: its settings, and per method the plots and the README parts as toggles.
+# tissue_masks finds the tissue pixels of a batch of tiles. write_dashboard builds the self-contained dashboard.html of a run: its settings, and per method the plots and the README parts as toggles;
+# for RELAX, relax_layers_html shows the maps as layers over the image, each with an opacity slider.
 
 import base64
 import html
+import io
 import json
 import re
 from pathlib import Path
 
 import markdown
+import numpy as np
 import torch
+from matplotlib import colormaps
+from PIL import Image
 
 from prepare import tissue_mask
 
@@ -29,6 +34,12 @@ summary:hover { opacity: .7; }
 .plots { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
 .plots img { max-width: 48%; background: white; border-radius: 8px; box-shadow: 0 1px 4px #0003; }
 pre { overflow-x: auto; }
+.relax-image { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: center; width: 100%; margin-bottom: 1.5rem; }
+.layers { position: relative; width: 336px; max-width: 100%; }
+.layers img { display: block; width: 100%; max-width: none; background: none; box-shadow: none; border-radius: 0; }
+.layers img + img { position: absolute; top: 0; left: 0; }
+.sliders label { display: flex; align-items: center; gap: .6rem; margin: .4rem 0; }
+.scale { display: inline-block; width: 6rem; height: .7rem; border-radius: 3px; }
 """
 
 
@@ -41,12 +52,63 @@ def tissue_masks(images):  # (B, 3, H, W) floats in [0, 1] -> (B, H, W) booleans
     return torch.stack([tissue_mask(tile) for tile in images])
 
 
+# The RELAX maps for the dashboard, built from its results (not from its static figures): per image, the importance, the uncertainty and the thresholded importance as coolwarm heat maps
+# (cold = low, warm = high) stacked over the input, each with an opacity slider and its colour scale with its value range; the uncertain pixels of the thresholded map are transparent.
+def relax_layers_html(relax_results):
+    colormap = colormaps["coolwarm"]
+    gradient_stops = []
+    for position in (0.0, 0.25, 0.5, 0.75, 1.0):
+        rgba = colormap(position)
+        gradient_stops.append(f"rgb({round(rgba[0] * 255)}, {round(rgba[1] * 255)}, {round(rgba[2] * 255)})")
+    gradient = f"linear-gradient(to right, {', '.join(gradient_stops)})"
+
+    page_part = ""
+    for image_index in relax_results["image_indices"]:
+        maps = relax_results["maps"][image_index]
+        image_channels_last = maps["image"].permute(1, 2, 0).numpy()  # (H, W, 3) in [0, 1]
+        layers = {"image": (image_channels_last * 255).round().astype(np.uint8)}  # {layer name: (H, W, 3 or 4) uint8}
+        value_ranges = {}
+        for map_name in ("importance", "uncertainty", "thresholded_importance"):
+            values = maps[map_name].numpy()  # (H, W)
+            is_shown = np.ones_like(values, dtype=bool)  # (H, W), the pixels that are coloured
+            if map_name == "thresholded_importance":
+                is_shown = values != 0  # the uncertain pixels (set to 0) are not coloured
+            low = values[is_shown].min()
+            high = values[is_shown].max()
+            scaled = (values - low) / (high - low)  # [0, 1] over the shown range of this map
+            rgba = colormap(scaled)  # (H, W, 4) in [0, 1]
+            rgba[:, :, 3] = is_shown  # transparent where not shown
+            layers[map_name] = (rgba * 255).round().astype(np.uint8)
+            value_ranges[map_name] = (low, high)
+
+        images = ""
+        sliders = ""
+        for layer_name, pixels in layers.items():
+            buffer = io.BytesIO()
+            Image.fromarray(pixels).save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode()
+            layer_id = f"relax_{image_index}_{layer_name}"
+            opacity = 0.0  # the uncertainty and the thresholded importance are switched on with their sliders
+            if layer_name == "image":
+                opacity = 1.0
+            if layer_name == "importance":
+                opacity = 0.5  # shown at the start, at half opacity
+            images += f"<img id='{layer_id}' src='data:image/png;base64,{encoded}' alt='{layer_name}' style='opacity: {opacity}'>"
+            if layer_name != "image":
+                low, high = value_ranges[layer_name]
+                slider = f"<input type='range' min='0' max='100' value='{round(opacity * 100)}' oninput=\"document.getElementById('{layer_id}').style.opacity = this.value / 100\">"
+                sliders += f"<label>{slider} {layer_name.replace('_', ' ')} <span class='scale' style='background: {gradient}'></span> {low:.3g} to {high:.3g}</label>"
+        page_part += f"<div class='relax-image'><div class='layers'>{images}</div><div class='sliders'><b>image {image_index}</b>{sliders}</div></div>"
+    return page_part
+
+
 # Writes results_dir/dashboard.html, to open with a double click: the settings of the run, then one section per method with its plots (embedded in the file,
 # so it can be moved or sent around) and the parts of that method's subsection of README.md (papers, questions, notes, ...) as toggles.
 def write_dashboard(results_dir, data_dir, cfg):
     icfg = cfg["interpret"]
     extraction_info = json.loads((data_dir / "info.json").read_text())
     readme = (Path(__file__).resolve().parent / "README.md").read_text()
+    results = torch.load(results_dir / "results.pt", weights_only=False)  # the outputs of all methods (see main() in interpret.py)
 
     summary = {
         "checkpoint": icfg["checkpoint_path"], "weights": icfg["model_weights"], "dataset": icfg["dataset"],
@@ -69,6 +131,8 @@ def write_dashboard(results_dir, data_dir, cfg):
                 debug_plots += image
             else:
                 headline_plots += image
+        if method_name == "relax":  # the maps as layers with opacity sliders instead of the static figures (which stay in its folder)
+            headline_plots = relax_layers_html(results["relax"])
         body += f"<section class='card'><h2>{method_name}</h2><div class='plots'>{headline_plots}</div>"
         if debug_plots != "":
             body += f"<details><summary>debug plots</summary><div class='plots'>{debug_plots}</div></details>"
