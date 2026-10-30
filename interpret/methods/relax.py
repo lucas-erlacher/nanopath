@@ -1,6 +1,7 @@
 # interpret/methods/relax.py: RELAX: which regions of an image its final embedding depends on, measured by how similar the embeddings of randomly masked copies of the image stay (the question: README.md).
 # Implements the equations of Wickstrøm et al. (RELAX, Eq. 2 and 9) with the masks of RISE (Petsiuk et al.), and makes one figure per analysed image: the input, the importance, the uncertainty and the thresholded importance.
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from matplotlib.figure import Figure
@@ -127,19 +128,25 @@ class RELAX:
 
         self.results = {"image_indices": self._image_indices, "maps": maps_per_image}  # the outputs of the method (the settings are in the config.json of the run)
 
-    # One figure per analysed image: the input, then the importance, the uncertainty and the thresholded importance as colour maps, each with its own colour bar. Returns {file name: figure}.
+    # One figure per analysed image: the input, then the importance, the uncertainty and the thresholded importance as heat maps (cold = low, warm = high) over the input at half opacity,
+    # each with its own colour bar. In the thresholded map only the certain pixels are coloured. Returns {file name: figure}.
     def plot(self):
         figures = {}
         for image_index in self.results["image_indices"]:
             maps = self.results["maps"][image_index]
-            figure = Figure(figsize=(16, 4))
-            axes = figure.subplots(1, 4)
-            image_channels_last = maps["image"].permute(1, 2, 0)  # (H, W, 3)
-            axes[0].imshow(image_channels_last.numpy())
+            image_channels_last = maps["image"].permute(1, 2, 0).numpy()  # (H, W, 3)
+            figure = Figure(figsize=(18, 4))
+            axes = figure.subplots(1, 4, gridspec_kw={"wspace": 0.35})
+            axes[0].imshow(image_channels_last)
             axes[0].set_title(f"image {image_index}")
             for axis, map_name in zip(axes[1:], ("importance", "uncertainty", "thresholded_importance")):
-                shown = axis.imshow(maps[map_name].numpy())
-                figure.colorbar(shown, ax=axis)
+                values = maps[map_name].numpy()
+                if map_name == "thresholded_importance":
+                    values = np.ma.masked_equal(values, 0.0)  # the uncertain pixels (set to 0) stay transparent
+                axis.imshow(image_channels_last)
+                shown = axis.imshow(values, cmap="coolwarm", alpha=0.5)
+                colorbar_axis = axis.inset_axes([1.03, 0.0, 0.05, 1.0])  # beside the panel, not taken out of it, so all four panels keep the same size
+                figure.colorbar(shown, cax=colorbar_axis)
                 axis.set_title(map_name.replace("_", " "))
             for axis in axes:
                 axis.axis("off")
