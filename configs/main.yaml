@@ -159,9 +159,9 @@ interpret:
     folds: 2
     num_collage_rows: 8 # rows of the collage
   relax:
-    num_masks: 500  # random masks per image (smoke run; the paper picks 3000)
+    num_masks: 3000  # random masks per image (the paper picks 3000)
     mask_batch_size: 250
-    num_images: 2  # tiles evenly spaced through the dataset (a fixed stride, no randomness); smoke run
+    num_images: 10  # tiles evenly spaced through the dataset (a fixed stride, no randomness)
     grid_side_length: 7  # inital mask size (used for sampling)
     visible_probability: 0.5  # probability that a mask pixel is visible 
     uncertainty_threshold_scale: 1.0  # gamma of U-RELAX: the importance is kept where the uncertainty is below gamma times its median
