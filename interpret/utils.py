@@ -34,11 +34,11 @@ summary:hover { opacity: .7; }
 .plots { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
 .plots img { max-width: 48%; background: white; border-radius: 8px; box-shadow: 0 1px 4px #0003; }
 pre { overflow-x: auto; }
-.relax-image { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: center; width: 100%; margin-bottom: 1.5rem; }
-.layers { position: relative; width: 336px; max-width: 100%; }
+.relax-image { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; width: 100%; margin-bottom: 1.5rem; }
+.panel { display: flex; flex-direction: column; gap: .3rem; min-width: 0; font-size: .85rem; }
+.layers { position: relative; width: 100%; }
 .layers img { display: block; width: 100%; max-width: none; background: none; box-shadow: none; border-radius: 0; }
 .layers img + img { position: absolute; top: 0; left: 0; }
-.sliders label { display: flex; align-items: center; gap: .6rem; margin: .4rem 0; }
 .scale { display: inline-block; width: 6rem; height: .7rem; border-radius: 3px; }
 """
 
@@ -52,8 +52,9 @@ def tissue_masks(images):  # (B, 3, H, W) floats in [0, 1] -> (B, H, W) booleans
     return torch.stack([tissue_mask(tile) for tile in images])
 
 
-# The RELAX maps for the dashboard, built from its results (not from its static figures): per image, the importance, the uncertainty and the thresholded importance as coolwarm heat maps
-# (cold = low, warm = high) stacked over the input, each with an opacity slider and its colour scale with its value range; the uncertain pixels of the thresholded map are transparent.
+# The RELAX maps for the dashboard, built from its results (not from its static figures): one row per image with four panels, the input, then the importance, the uncertainty and the
+# thresholded importance, each as a coolwarm heat map (cold = low, warm = high) over its own copy of the input with its own opacity slider, colour scale and value range, so that all
+# three can be shown at once and compared side by side; the uncertain pixels of the thresholded map are transparent.
 def relax_layers_html(relax_results):
     colormap = colormaps["coolwarm"]
     gradient_stops = []
@@ -81,24 +82,21 @@ def relax_layers_html(relax_results):
             layers[map_name] = (rgba * 255).round().astype(np.uint8)
             value_ranges[map_name] = (low, high)
 
-        images = ""
-        sliders = ""
+        encoded = {}  # {layer name: the PNG of the layer as base64}
         for layer_name, pixels in layers.items():
             buffer = io.BytesIO()
             Image.fromarray(pixels).save(buffer, format="PNG")
-            encoded = base64.b64encode(buffer.getvalue()).decode()
-            layer_id = f"relax_{image_index}_{layer_name}"
-            opacity = 0.0  # the uncertainty and the thresholded importance are switched on with their sliders
-            if layer_name == "image":
-                opacity = 1.0
-            if layer_name == "importance":
-                opacity = 0.5  # shown at the start, at half opacity
-            images += f"<img id='{layer_id}' src='data:image/png;base64,{encoded}' alt='{layer_name}' style='opacity: {opacity}'>"
-            if layer_name != "image":
-                low, high = value_ranges[layer_name]
-                slider = f"<input type='range' min='0' max='100' value='{round(opacity * 100)}' oninput=\"document.getElementById('{layer_id}').style.opacity = this.value / 100\">"
-                sliders += f"<label>{slider} {layer_name.replace('_', ' ')} <span class='scale' style='background: {gradient}'></span> {low:.3g} to {high:.3g}</label>"
-        page_part += f"<div class='relax-image'><div class='layers'>{images}</div><div class='sliders'><b>image {image_index}</b>{sliders}</div></div>"
+            encoded[layer_name] = base64.b64encode(buffer.getvalue()).decode()
+        image_tag = f"<img src='data:image/png;base64,{encoded['image']}' alt='image'>"
+        panels = f"<div class='panel'><div class='layers'>{image_tag}</div><b>image {image_index}</b></div>"
+        for map_name in ("importance", "uncertainty", "thresholded_importance"):
+            layer_id = f"relax_{image_index}_{map_name}"
+            low, high = value_ranges[map_name]
+            overlay = f"<img id='{layer_id}' src='data:image/png;base64,{encoded[map_name]}' alt='{map_name}' style='opacity: 0.5'>"
+            slider = f"<input type='range' min='0' max='100' value='50' oninput=\"document.getElementById('{layer_id}').style.opacity = this.value / 100\">"
+            scale = f"<span><span class='scale' style='background: {gradient}'></span> {low:.3g} to {high:.3g}</span>"
+            panels += f"<div class='panel'><div class='layers'>{image_tag}{overlay}</div><b>{map_name.replace('_', ' ')}</b>{slider}{scale}</div>"
+        page_part += f"<div class='relax-image'>{panels}</div>"
     return page_part
 
 
