@@ -140,7 +140,7 @@ interpret:
     epochs: 50
     batch_size: 512
     num_workers: 8  # DataLoader worker processes that fetch the batches of the probe in parallel (CPU cores minus 1)
-    leakage_group:slide_id  # metadata field whose values are never split across train and validation 
+    leakage_group: slide_id  # metadata field whose values are never split across train and validation 
     folds: 2
   layer_inversion:
     decoders: [linear, transformer]
