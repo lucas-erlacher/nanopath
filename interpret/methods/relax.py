@@ -119,6 +119,9 @@ class RELAX:
                 is_certain = uncertainty < uncertainty_threshold  # (H, W) booleans
                 thresholded_importance = importance * is_certain
 
+                if image_index == self._image_indices[0]:
+                    example_masks = masks[:20, 0].cpu()
+
                 maps_per_image[image_index] = {
                     "image": rgb_image.cpu(),
                     "importance": importance.cpu(),
@@ -126,7 +129,7 @@ class RELAX:
                     "thresholded_importance": thresholded_importance.cpu(),
                 }
 
-        self.results = {"image_indices": self._image_indices, "maps": maps_per_image}  # the outputs of the method (the settings are in the config.json of the run)
+        self.results = {"image_indices": self._image_indices, "maps": maps_per_image, "example_masks": example_masks}  # the outputs of the method (the settings are in the config.json of the run)
 
     # One figure per analysed image: the input, then the importance, the uncertainty and the thresholded importance as heat maps (cold = low, warm = high) over the input at half opacity,
     # each with its own colour bar. In the thresholded map only the certain pixels are coloured. Returns {file name: figure}.
@@ -151,4 +154,12 @@ class RELAX:
             for axis in axes:
                 axis.axis("off")
             figures[f"image_{image_index}"] = figure
+
+        figure = Figure(figsize=(10, 8))
+        axes = figure.subplots(4, 5)
+        for axis, mask in zip(axes.flat, self.results["example_masks"]):
+            axis.imshow(mask.numpy(), cmap="gray", vmin=0, vmax=1)
+            axis.axis("off")
+        figure.suptitle("20 example RELAX masks (white = visible)")
+        figures["debug_masks"] = figure
         return figures
